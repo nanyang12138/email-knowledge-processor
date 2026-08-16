@@ -5,7 +5,8 @@
 的云端模型，不需要本地 GPU。
 
 完整产品方向与公开发布计划见
-[个人知识系统产品计划](docs/PRODUCT_PLAN.md)。
+[个人知识系统产品计划](docs/PRODUCT_PLAN.md)，
+对该计划的评审意见见[产品计划评审](docs/PLAN_REVIEW.md)。
 
 ## 准确性设计
 
