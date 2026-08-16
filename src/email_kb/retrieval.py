@@ -298,6 +298,9 @@ def index_knowledge(
     }
 
 
+_FEEDBACK_WEIGHTS = {"useful": 2.0, "not_useful": -2.0, "outdated": -1.0}
+
+
 def _rank(
     relevance: float,
     *,
@@ -306,6 +309,7 @@ def _rank(
     importance: int | None,
     gap_reasons: Sequence[str],
     agreement: float | None,
+    feedback: str | None = None,
 ) -> dict[str, Any]:
     """
     Explain every ranking factor instead of returning one opaque number.
@@ -321,6 +325,7 @@ def _rank(
         "importance": round((importance or 0) / 100, 4),
         "known_gaps": round(-0.25 * len(gap_reasons), 4),
         "pass_agreement": round((agreement if agreement is not None else 0.5) - 0.5, 4),
+        "owner_feedback": _FEEDBACK_WEIGHTS.get(feedback or "", 0.0),
     }
     return {"score": round(sum(components.values()), 4), "components": components}
 
@@ -372,6 +377,7 @@ def advisories(
     gap_reasons: Sequence[str],
     outcome_state: str,
     occurred_at: str | None,
+    feedback: str | None = None,
 ) -> list[str]:
     """
     Limits an agent must not have to infer.
@@ -381,6 +387,15 @@ def advisories(
     these to every result puts the constraint in the payload instead.
     """
     notes: list[str] = []
+    if feedback == "outdated":
+        notes.append(
+            "The owner marked this as no longer applicable. Treat it as history, "
+            "not as current guidance."
+        )
+    if feedback == "wrong":
+        notes.append(
+            "The owner marked this as a misreading of the source. Do not rely on it."
+        )
     if outcome_state != "confirmed":
         notes.append(
             "No outcome was recorded for this case. Do not present the approach "
@@ -404,8 +419,16 @@ def advisories(
     return notes
 
 
+def _optional(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _case_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any]:
     gap_reasons = json.loads(row["gap_reasons_json"] or "[]")
+    feedback = _optional(row, "owner_feedback")
     return {
         "thread_id": row["thread_id"],
         "subject": row["subject"],
@@ -422,11 +445,13 @@ def _case_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any
         "gap_reasons": gap_reasons,
         "pass_agreement": row["agreement_score"],
         "occurred_between": [row["started_at"], row["ended_at"]],
+        "owner_feedback": feedback,
         "advisories": advisories(
             status=str(row["thread_status"]),
             gap_reasons=gap_reasons,
             outcome_state=str(row["outcome_state"]),
             occurred_at=row["ended_at"],
+            feedback=feedback,
         ),
         "ranking": ranking,
     }
@@ -446,11 +471,15 @@ def find_similar_cases(
     placeholders = ", ".join("?" for _ in statuses)
     rows = connection.execute(
         f"""
-        SELECT cases.*, -bm25(cases_fts, 0.0, 10.0, 3.0, 3.0, 2.0) AS relevance
+        SELECT cases.*, owner.verdict AS owner_feedback,
+               -bm25(cases_fts, 0.0, 10.0, 3.0, 3.0, 2.0) AS relevance
         FROM cases_fts
         JOIN cases ON cases.thread_id = cases_fts.thread_id
+        LEFT JOIN current_feedback AS owner
+          ON owner.target_kind = 'case' AND owner.target_id = cases.thread_id
         WHERE cases_fts MATCH ?
           AND cases.thread_status IN ({placeholders})
+          AND COALESCE(owner.verdict, '') <> 'wrong'
         ORDER BY relevance DESC
         LIMIT ?
         """,
@@ -467,6 +496,7 @@ def find_similar_cases(
                 importance=row["importance_score"],
                 gap_reasons=json.loads(row["gap_reasons_json"] or "[]"),
                 agreement=row["agreement_score"],
+                feedback=row["owner_feedback"],
             ),
         )
         for row in rows
@@ -488,17 +518,27 @@ def _claim_rows(
         return []
     type_placeholders = ", ".join("?" for _ in types)
     status_placeholders = ", ".join("?" for _ in statuses)
+    # A claim inherits its case's verdict when it has none of its own, so
+    # rejecting a whole case also removes the claims drawn from it.
     return connection.execute(
         f"""
         SELECT claims.*, cases.outcome_state, cases.gap_reasons_json,
                cases.agreement_score, cases.subject,
+               COALESCE(on_claim.verdict, on_case.verdict) AS owner_feedback,
                -bm25(claims_fts) AS relevance
         FROM claims_fts
         JOIN claims ON claims.claim_uid = claims_fts.claim_uid
         LEFT JOIN cases ON cases.thread_id = claims.thread_id
+        LEFT JOIN current_feedback AS on_claim
+          ON on_claim.target_kind = 'claim'
+         AND on_claim.target_id = claims.claim_uid
+        LEFT JOIN current_feedback AS on_case
+          ON on_case.target_kind = 'case' AND on_case.target_id = claims.thread_id
         WHERE claims_fts MATCH ?
           AND claims.claim_type IN ({type_placeholders})
           AND claims.thread_status IN ({status_placeholders})
+          AND COALESCE(on_claim.verdict, '') <> 'wrong'
+          AND COALESCE(on_case.verdict, '') <> 'wrong'
         ORDER BY relevance DESC
         LIMIT ?
         """,
@@ -509,6 +549,7 @@ def _claim_rows(
 def _claim_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any]:
     gap_reasons = json.loads(row["gap_reasons_json"] or "[]")
     outcome_state = str(row["outcome_state"] or "unknown")
+    feedback = _optional(row, "owner_feedback")
     return {
         "claim_uid": row["claim_uid"],
         "thread_id": row["thread_id"],
@@ -520,11 +561,13 @@ def _claim_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, An
         "outcome_state": outcome_state,
         "gap_reasons": gap_reasons,
         "evidence": json.loads(row["evidence_json"] or "[]"),
+        "owner_feedback": feedback,
         "advisories": advisories(
             status=str(row["thread_status"]),
             gap_reasons=gap_reasons,
             outcome_state=outcome_state,
             occurred_at=row["occurred_at"],
+            feedback=feedback,
         ),
         "ranking": ranking,
     }
@@ -541,6 +584,7 @@ def _ranked_claims(rows: Sequence[sqlite3.Row], *, limit: int) -> list[dict[str,
                 importance=row["importance_score"],
                 gap_reasons=json.loads(row["gap_reasons_json"] or "[]"),
                 agreement=row["agreement_score"],
+                feedback=row["owner_feedback"],
             ),
         )
         for row in rows
@@ -586,10 +630,14 @@ def lookup_identifier(
     placeholders = ", ".join("?" for _ in values)
     rows = connection.execute(
         f"""
-        SELECT DISTINCT identifiers.value, identifiers.kind, cases.*
+        SELECT DISTINCT identifiers.value, identifiers.kind, cases.*,
+               owner.verdict AS owner_feedback
         FROM identifiers
         JOIN cases ON cases.thread_id = identifiers.thread_id
+        LEFT JOIN current_feedback AS owner
+          ON owner.target_kind = 'case' AND owner.target_id = cases.thread_id
         WHERE identifiers.value IN ({placeholders})
+          AND COALESCE(owner.verdict, '') <> 'wrong'
         ORDER BY cases.ended_at DESC
         LIMIT ?
         """,
@@ -606,9 +654,21 @@ def lookup_identifier(
 
 
 def get_case(connection: sqlite3.Connection, thread_id: str) -> dict[str, Any] | None:
-    """One case with every validated claim and its evidence."""
+    """
+    One case with every validated claim and its evidence.
+
+    A case the owner marked wrong is still returned here: it was asked for by
+    id, and hiding it would make the verdict itself unreadable.
+    """
     row = connection.execute(
-        "SELECT * FROM cases WHERE thread_id = ?", (thread_id,)
+        """
+        SELECT cases.*, owner.verdict AS owner_feedback
+        FROM cases
+        LEFT JOIN current_feedback AS owner
+          ON owner.target_kind = 'case' AND owner.target_id = cases.thread_id
+        WHERE cases.thread_id = ?
+        """,
+        (thread_id,),
     ).fetchone()
     if row is None:
         return None

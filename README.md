@@ -221,7 +221,32 @@ API Key 配置完成后查看当前账户实际可用的模型：
 和可展开的 `ranking.components`。`outcome_state` 为 `unknown` 表示**这件事的结果
 从来没人写下来**，不能当作"这个做法有效"。
 
-## 6. 给 AI Agent 用（MCP）
+## 6. 反馈标注
+
+重要度标定和个人相关性只能靠你的信号校准，模型没有别的来源。标注数据越早开始
+积累越好，所以这一步不要等到最后：
+
+```powershell
+# 还没判断过的知识，按重要度排序，附带原文引用
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db review --limit 20
+
+# 记录判断。target 是 claim uid（thread:claim）或 thread id
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mark "<thread>:c1" useful
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mark "<thread>" wrong --note "把通知要求当成了实际行动"
+```
+
+四种判断的效果**故意不对称**：
+
+| 判断 | 效果 |
+| --- | --- |
+| `useful` / `not_useful` | 只影响排序，不改变知识内容 |
+| `wrong` | 对 Agent 隐藏，但 `case` 命令仍可按 id 打开查看 |
+| `outdated` | 保留并降权，每条结果附加"已不再适用"的告诫 |
+
+反馈是用户数据不是派生层，存在独立表里、查询时关联，**重建索引不会丢失**。
+记录只追加不覆盖，改变判断时旧记录仍在，最新一条生效。
+
+## 7. 给 AI Agent 用（MCP）
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[agent]"

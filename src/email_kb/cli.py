@@ -11,6 +11,7 @@ from cursor_sdk import Cursor
 
 from .analysis import analyze_database
 from .database import connect, database_stats, initialize, quality_report
+from .feedback import VERDICTS, feedback_stats, record_feedback, review_queue
 from .ingest import ingest_sources
 from .retrieval import (
     AGENT_VISIBLE_STATUSES,
@@ -136,6 +137,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     case.add_argument("thread_id")
 
+    review = subparsers.add_parser(
+        "review",
+        help="Show knowledge you have not judged yet, most consequential first",
+    )
+    review.add_argument("--limit", type=int, default=20)
+
+    mark = subparsers.add_parser(
+        "mark", help="Record your judgement of one claim or case"
+    )
+    mark.add_argument("target_id", help="A claim uid (thread:claim) or a thread id")
+    mark.add_argument("verdict", choices=VERDICTS)
+    mark.add_argument("--note", help="Why, in your own words")
+
     subparsers.add_parser("models", help="List Cursor models available to the API key")
     return parser
 
@@ -193,7 +207,22 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "ingest":
                 _print_json(ingest_sources(connection, args.paths, force=args.force))
             elif args.command == "stats":
-                _print_json(database_stats(connection) | index_stats(connection))
+                _print_json(
+                    database_stats(connection)
+                    | index_stats(connection)
+                    | feedback_stats(connection)
+                )
+            elif args.command == "review":
+                _print_json(review_queue(connection, limit=args.limit))
+            elif args.command == "mark":
+                _print_json(
+                    record_feedback(
+                        connection,
+                        target_id=args.target_id,
+                        verdict=args.verdict,
+                        note=args.note,
+                    )
+                )
             elif args.command == "report":
                 _print_json(quality_report(connection))
             elif args.command == "index":

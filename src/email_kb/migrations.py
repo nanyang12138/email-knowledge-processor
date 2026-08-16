@@ -200,10 +200,41 @@ CREATE VIRTUAL TABLE IF NOT EXISTS cases_fts USING fts5(
 """
 
 
+# Feedback is user data, not a derived index, so it lives in its own table and
+# is joined at query time. Rebuilding the retrieval index never discards it.
+#
+# Rows are append-only: a later verdict supersedes an earlier one through
+# current_feedback rather than overwriting it, so a change of mind stays legible.
+FEEDBACK = """
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_target
+    ON feedback(target_kind, target_id);
+
+CREATE VIEW IF NOT EXISTS current_feedback AS
+SELECT target_kind, target_id, verdict, note, created_at
+FROM feedback AS outer_feedback
+WHERE outer_feedback.id = (
+    SELECT MAX(id)
+    FROM feedback AS inner_feedback
+    WHERE inner_feedback.target_kind = outer_feedback.target_kind
+      AND inner_feedback.target_id = outer_feedback.target_id
+);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline", BASELINE),
     (2, "independent_passes", INDEPENDENT_PASSES),
     (3, "retrieval", RETRIEVAL),
+    (4, "feedback", FEEDBACK),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
