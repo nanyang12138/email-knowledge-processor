@@ -47,7 +47,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("report", help="Show evidence and verification quality")
 
     analyze = subparsers.add_parser(
-        "analyze", help="Extract and independently verify thread knowledge"
+        "analyze",
+        help="Extract thread knowledge with two blind passes and reconcile them",
     )
     analyze.add_argument(
         "--owner-email",
@@ -57,24 +58,33 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--model",
         default="auto",
-        help="Cursor extraction model id (default: auto)",
+        help="Model for the first blind extraction pass (default: auto)",
     )
     analyze.add_argument(
-        "--verifier-model",
-        help="Independent verifier model id (default: same as --model)",
+        "--second-model",
+        help=(
+            "Model for the second blind pass (default: same as --model). "
+            "A different model makes the agreement score more informative."
+        ),
+    )
+    analyze.add_argument(
+        "--reconciler-model",
+        help="Model that reconciles the two passes (default: same as --model)",
     )
     analyze.add_argument("--limit", type=int, help="Maximum threads to consider")
     analyze.add_argument(
-        "--max-threads-per-batch",
-        type=int,
-        default=8,
-        help="Maximum complete threads in one Cursor run",
-    )
-    analyze.add_argument(
-        "--max-chars-per-batch",
+        "--max-chars-per-request",
         type=int,
         default=80_000,
-        help="Maximum source characters in one Cursor run",
+        help="Maximum source characters in one Cursor run; longer threads are "
+        "split into ordered segments rather than dropped",
+    )
+    analyze.add_argument(
+        "--min-agreement",
+        type=float,
+        default=0.5,
+        help="Evidence overlap below which the two blind passes are treated as "
+        "disagreeing (default: 0.5)",
     )
     analyze.add_argument(
         "--force", action="store_true", help="Reanalyze unchanged verified threads"
@@ -82,7 +92,7 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--dry-run",
         action="store_true",
-        help="Estimate batches without calling Cursor or changing analysis state",
+        help="Estimate runs without calling Cursor or changing analysis state",
     )
 
     subparsers.add_parser("models", help="List Cursor models available to the API key")
@@ -133,10 +143,11 @@ def main(argv: list[str] | None = None) -> int:
                         owner_email=args.owner_email,
                         workspace=Path.cwd(),
                         model=args.model,
-                        verifier_model=args.verifier_model,
+                        second_model=args.second_model,
+                        reconciler_model=args.reconciler_model,
                         limit=args.limit,
-                        max_threads_per_batch=args.max_threads_per_batch,
-                        max_chars_per_batch=args.max_chars_per_batch,
+                        max_chars_per_request=args.max_chars_per_request,
+                        min_agreement=args.min_agreement,
                         force=args.force,
                         dry_run=args.dry_run,
                     )

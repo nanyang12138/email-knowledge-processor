@@ -8,7 +8,8 @@ param(
 
     [int]$Limit = 5,
     [string]$Model = "auto",
-    [string]$VerifierModel = "",
+    [string]$SecondModel = "",
+    [string]$ReconcilerModel = "",
     [switch]$DryRun,
     [switch]$Force
 )
@@ -50,8 +51,11 @@ try {
         "--owner-email", $OwnerEmail,
         "--model", $Model
     )
-    if ($VerifierModel) {
-        $AnalyzeArguments += @("--verifier-model", $VerifierModel)
+    if ($SecondModel) {
+        $AnalyzeArguments += @("--second-model", $SecondModel)
+    }
+    if ($ReconcilerModel) {
+        $AnalyzeArguments += @("--reconciler-model", $ReconcilerModel)
     }
     if ($Limit -gt 0) {
         $AnalyzeArguments += @("--limit", $Limit)

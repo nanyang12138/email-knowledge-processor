@@ -98,7 +98,41 @@ CREATE TABLE IF NOT EXISTS thread_analyses (
 """
 
 
-MIGRATIONS: tuple[tuple[int, str, str], ...] = ((1, "baseline", BASELINE),)
+# Independent blind passes replace the anchored extract-then-verify flow, and
+# status is now decided by program checks. The model's self-reported confidence
+# is renamed to say plainly that it is a model claim rather than a measurement.
+#
+# The two anchored-flow columns are dropped rather than reinterpreted: their
+# contents came from a verifier that had already seen the proposal, so carrying
+# them forward under new names would misrepresent them. The raw model outputs
+# they held remain in analysis_runs.output_json.
+#
+# Any thread previously marked verified was gated on a model-reported field, so
+# it is marked stale and will be analyzed again instead of being trusted.
+INDEPENDENT_PASSES = """
+ALTER TABLE thread_analyses RENAME COLUMN factual_confidence
+    TO model_reported_confidence;
+ALTER TABLE thread_analyses DROP COLUMN extraction_json;
+ALTER TABLE thread_analyses DROP COLUMN verification_json;
+ALTER TABLE thread_analyses ADD COLUMN proposals_json TEXT;
+ALTER TABLE thread_analyses ADD COLUMN agreement_score REAL;
+ALTER TABLE thread_analyses ADD COLUMN gap_reasons_json TEXT;
+ALTER TABLE thread_analyses ADD COLUMN segment_count INTEGER;
+
+UPDATE thread_analyses
+SET status = 'stale'
+WHERE status IN ('verified', 'verified_with_gaps');
+
+ALTER TABLE analysis_runs ADD COLUMN pass_label TEXT;
+ALTER TABLE analysis_runs ADD COLUMN evidence_claims_checked INTEGER;
+ALTER TABLE analysis_runs ADD COLUMN evidence_claims_valid INTEGER;
+"""
+
+
+MIGRATIONS: tuple[tuple[int, str, str], ...] = (
+    (1, "baseline", BASELINE),
+    (2, "independent_passes", INDEPENDENT_PASSES),
+)
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

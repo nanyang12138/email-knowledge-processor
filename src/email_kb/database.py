@@ -265,34 +265,72 @@ def database_stats(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def _mean(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 4) if values else None
+
+
+def evidence_pass_rate_by_stage(connection: sqlite3.Connection) -> dict[str, Any]:
+    """
+    Per-stage hallucination rate.
+
+    The blind extraction passes are measured separately from the reconciled
+    result. Without this split the only visible number is the pass rate of
+    claims that survived reconciliation, which says nothing about how often
+    extraction invents evidence in the first place.
+    """
+    rows = connection.execute(
+        """
+        SELECT
+          phase,
+          SUM(COALESCE(evidence_claims_checked, 0)) AS checked,
+          SUM(COALESCE(evidence_claims_valid, 0)) AS valid,
+          COUNT(*) AS runs
+        FROM analysis_runs
+        WHERE status = 'finished' AND evidence_claims_checked IS NOT NULL
+        GROUP BY phase
+        """
+    ).fetchall()
+    stages: dict[str, Any] = {}
+    for row in rows:
+        checked = int(row["checked"] or 0)
+        valid = int(row["valid"] or 0)
+        stages[str(row["phase"])] = {
+            "runs": int(row["runs"]),
+            "claims_checked": checked,
+            "claims_valid": valid,
+            "evidence_pass_rate": round(valid / checked, 4) if checked else None,
+        }
+    return stages
+
+
 def quality_report(connection: sqlite3.Connection) -> dict[str, Any]:
     rows = connection.execute(
         """
-        SELECT status, importance_score, factual_confidence, verified_json
+        SELECT status, importance_score, model_reported_confidence,
+               agreement_score, gap_reasons_json, segment_count
         FROM thread_analyses
         """
     ).fetchall()
     statuses: dict[str, int] = {}
-    checked_claims = 0
-    valid_claims = 0
+    gap_reasons: dict[str, int] = {}
     confidences: list[float] = []
+    agreements: list[float] = []
     high_importance = 0
+    segmented = 0
 
     for row in rows:
         status = str(row["status"])
         statuses[status] = statuses.get(status, 0) + 1
-        if row["factual_confidence"] is not None:
-            confidences.append(float(row["factual_confidence"]))
+        if row["model_reported_confidence"] is not None:
+            confidences.append(float(row["model_reported_confidence"]))
+        if row["agreement_score"] is not None:
+            agreements.append(float(row["agreement_score"]))
         if row["importance_score"] is not None and int(row["importance_score"]) >= 80:
             high_importance += 1
-        try:
-            verified = json.loads(row["verified_json"] or "{}")
-        except json.JSONDecodeError:
-            verified = {}
-        validation = verified.get("validation", {})
-        if isinstance(validation, Mapping):
-            checked_claims += int(validation.get("evidence_claims_checked") or 0)
-            valid_claims += int(validation.get("evidence_claims_valid") or 0)
+        if row["segment_count"] is not None and int(row["segment_count"]) > 1:
+            segmented += 1
+        for reason in json.loads(row["gap_reasons_json"] or "[]"):
+            gap_reasons[str(reason)] = gap_reasons.get(str(reason), 0) + 1
 
     failed_runs = int(
         connection.execute(
@@ -303,14 +341,18 @@ def quality_report(connection: sqlite3.Connection) -> dict[str, Any]:
         "analyzed_threads": len(rows),
         "status_counts": statuses,
         "high_importance_threads": high_importance,
-        "evidence_claims_checked": checked_claims,
-        "evidence_claims_valid": valid_claims,
-        "evidence_pass_rate": (
-            round(valid_claims / checked_claims, 4) if checked_claims else None
-        ),
-        "average_verifier_confidence": (
-            round(sum(confidences) / len(confidences), 4) if confidences else None
-        ),
+        "segmented_threads": segmented,
+        "evidence_pass_rate_by_stage": evidence_pass_rate_by_stage(connection),
+        "independent_pass_agreement": {
+            "threads_scored": len(agreements),
+            "mean": _mean(agreements),
+            "min": round(min(agreements), 4) if agreements else None,
+        },
+        "gap_reasons": gap_reasons,
+        # Reported by the model, never used to decide status. Kept only so a
+        # drift between what the model claims and what the checks find is
+        # visible rather than hidden.
+        "average_model_reported_confidence": _mean(confidences),
         "failed_agent_runs": failed_runs,
     }
 
@@ -397,6 +439,9 @@ def record_run(
     agent_id: str | None = None,
     run_id: str | None = None,
     model: str | None = None,
+    pass_label: str | None = None,
+    evidence_claims_checked: int | None = None,
+    evidence_claims_valid: int | None = None,
     output: Any = None,
     error: str | None = None,
     duration_ms: int | None = None,
@@ -405,9 +450,10 @@ def record_run(
         """
         INSERT INTO analysis_runs (
             batch_id, phase, status, thread_ids_json, input_sha256,
-            agent_id, run_id, model, output_json, error, duration_ms, created_at
+            agent_id, run_id, model, pass_label, evidence_claims_checked,
+            evidence_claims_valid, output_json, error, duration_ms, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             batch_id,
@@ -418,6 +464,9 @@ def record_run(
             agent_id,
             run_id,
             model,
+            pass_label,
+            evidence_claims_checked,
+            evidence_claims_valid,
             (json.dumps(output, ensure_ascii=False) if output is not None else None),
             error,
             duration_ms,
@@ -434,26 +483,30 @@ def save_thread_analysis(
     source_fingerprint: str,
     status: str,
     importance_score: int | None,
-    factual_confidence: float | None,
-    extraction: Any,
-    verification: Any,
+    model_reported_confidence: float | None,
+    agreement_score: float | None,
+    gap_reasons: list[str] | None,
+    segment_count: int | None,
+    proposals: Any,
     verified: Any,
 ) -> None:
     connection.execute(
         """
         INSERT INTO thread_analyses (
             thread_id, source_fingerprint, status, importance_score,
-            factual_confidence, extraction_json, verification_json,
-            verified_json, updated_at
+            model_reported_confidence, agreement_score, gap_reasons_json,
+            segment_count, proposals_json, verified_json, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             source_fingerprint = excluded.source_fingerprint,
             status = excluded.status,
             importance_score = excluded.importance_score,
-            factual_confidence = excluded.factual_confidence,
-            extraction_json = excluded.extraction_json,
-            verification_json = excluded.verification_json,
+            model_reported_confidence = excluded.model_reported_confidence,
+            agreement_score = excluded.agreement_score,
+            gap_reasons_json = excluded.gap_reasons_json,
+            segment_count = excluded.segment_count,
+            proposals_json = excluded.proposals_json,
             verified_json = excluded.verified_json,
             updated_at = excluded.updated_at
         """,
@@ -462,9 +515,11 @@ def save_thread_analysis(
             source_fingerprint,
             status,
             importance_score,
-            factual_confidence,
-            json.dumps(extraction, ensure_ascii=False) if extraction else None,
-            json.dumps(verification, ensure_ascii=False) if verification else None,
+            model_reported_confidence,
+            agreement_score,
+            json.dumps(gap_reasons or [], ensure_ascii=False),
+            segment_count,
+            json.dumps(proposals, ensure_ascii=False) if proposals else None,
             json.dumps(verified, ensure_ascii=False) if verified else None,
             utc_now(),
         ),
