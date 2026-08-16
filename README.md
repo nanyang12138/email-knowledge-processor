@@ -186,6 +186,61 @@ API Key 配置完成后查看当前账户实际可用的模型：
 - 升级到 schema v2 时，此前用「抽取后复核」流程产生的分析会被标记为 `stale`
   并重新分析。那些结论的 `verified` 状态曾由模型自报字段决定，不能直接沿用。
 
+## 5. 建立检索索引
+
+分析结果确认后，把 case 和 claim 建成可检索索引：
+
+```powershell
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db index
+```
+
+索引是纯派生层，每次重建都会先清空。**只索引 `verified` 和 `verified_with_gaps`**，
+未通过校验的知识不会进入 Agent 的上下文。
+
+检索按任务意图分四种模式，而不是一个通用搜索框：
+
+```powershell
+# 我现在遇到这个情况，过去有类似的吗
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db search `
+  --mode cases "夜间构建在 Windows 上失败"
+
+# 有哪些可复用规则可能适用
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db search --mode rules "构建失败"
+
+# 这个做法我是不是已经试过了
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db search --mode prior "锁定工具链版本"
+
+# 精确标识符，不会被语义相近的正文淹没
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db search --mode identifier "CL 12345"
+
+# 展开某个 case 的全部 claim 和证据
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db case "<thread-id>"
+```
+
+每条结果都带 `status`、`gap_reasons`、`outcome_state`、`evidence`、`advisories`
+和可展开的 `ranking.components`。`outcome_state` 为 `unknown` 表示**这件事的结果
+从来没人写下来**，不能当作"这个做法有效"。
+
+## 6. 给 AI Agent 用（MCP）
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[agent]"
+.\.venv\Scripts\python.exe -m email_kb.mcp_server --db data\knowledge.db
+```
+
+工具按**任务意图**命名，而不是按检索方式：
+
+- `find_similar_cases(situation)`：我现在的情况过去发生过吗
+- `get_applicable_rules(context)`：有哪些规则可能约束现在这件事
+- `check_if_i_tried_this_before(approach)`：这个做法试过没有，结果如何
+- `lookup_identifier(identifier)`：精确查 CL / bug / ticket / build / commit
+- `get_case(thread_id)`：展开证据自行核对
+- `knowledge_coverage()`：知识库现在覆盖了多少、可靠性如何
+
+叫 `search_knowledge` 的话，Agent 会把它当搜索框用完就走；按意图命名才会引导出
+"先看看这个人以前怎么做的"这一步。排序信号里包含**这条经验过去的结果是好是坏**，
+这是纯文档检索无法表达的。
+
 ## 开发自检
 
 ```powershell

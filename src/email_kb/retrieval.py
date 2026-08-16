@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from .database import utc_now
@@ -324,7 +325,87 @@ def _rank(
     return {"score": round(sum(components.values()), 4), "components": components}
 
 
+STALE_AFTER_DAYS = 730
+
+_GAP_ADVISORIES = {
+    "attachment_content_unavailable": (
+        "Attachment contents were never imported, so part of this case is "
+        "missing. Do not describe what an attachment said."
+    ),
+    "message_too_large_to_analyze": (
+        "At least one message in this thread was too large to analyze and is "
+        "not represented here."
+    ),
+    "model_reported_missing_context": (
+        "The extractor reported that necessary context is missing from this thread."
+    ),
+    "independent_passes_disagreed_on_category": (
+        "The two independent passes disagreed about what kind of thread this "
+        "is. Check the evidence before relying on the framing."
+    ),
+    "independent_passes_disagreed_on_importance": (
+        "The two independent passes disagreed about how important this is, so "
+        "its rank here is unreliable."
+    ),
+    "independent_passes_cited_different_evidence": (
+        "The two independent passes cited largely different evidence, which "
+        "means the reading of this thread is unstable."
+    ),
+}
+
+
+def _age_days(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - moment).days
+
+
+def advisories(
+    *,
+    status: str,
+    gap_reasons: Sequence[str],
+    outcome_state: str,
+    occurred_at: str | None,
+) -> list[str]:
+    """
+    Limits an agent must not have to infer.
+
+    The seven-step usage contract in the product plan is only a convention:
+    nothing stops an agent from taking a snippet and running with it. Attaching
+    these to every result puts the constraint in the payload instead.
+    """
+    notes: list[str] = []
+    if outcome_state != "confirmed":
+        notes.append(
+            "No outcome was recorded for this case. Do not present the approach "
+            "as known to have worked."
+        )
+    for reason in gap_reasons:
+        advisory = _GAP_ADVISORIES.get(str(reason))
+        if advisory:
+            notes.append(advisory)
+    if status != "verified":
+        notes.append(
+            f"This knowledge has status {status!r} rather than 'verified'; "
+            "check the cited evidence before acting on it."
+        )
+    age = _age_days(occurred_at)
+    if age is not None and age > STALE_AFTER_DAYS:
+        notes.append(
+            f"This is about {age // 365} years old. Confirm it still applies "
+            "before relying on it."
+        )
+    return notes
+
+
 def _case_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any]:
+    gap_reasons = json.loads(row["gap_reasons_json"] or "[]")
     return {
         "thread_id": row["thread_id"],
         "subject": row["subject"],
@@ -338,9 +419,15 @@ def _case_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any
         "category": row["category"],
         "importance_score": row["importance_score"],
         "status": row["thread_status"],
-        "gap_reasons": json.loads(row["gap_reasons_json"] or "[]"),
+        "gap_reasons": gap_reasons,
         "pass_agreement": row["agreement_score"],
         "occurred_between": [row["started_at"], row["ended_at"]],
+        "advisories": advisories(
+            status=str(row["thread_status"]),
+            gap_reasons=gap_reasons,
+            outcome_state=str(row["outcome_state"]),
+            occurred_at=row["ended_at"],
+        ),
         "ranking": ranking,
     }
 
@@ -420,6 +507,8 @@ def _claim_rows(
 
 
 def _claim_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, Any]:
+    gap_reasons = json.loads(row["gap_reasons_json"] or "[]")
+    outcome_state = str(row["outcome_state"] or "unknown")
     return {
         "claim_uid": row["claim_uid"],
         "thread_id": row["thread_id"],
@@ -428,9 +517,15 @@ def _claim_payload(row: sqlite3.Row, ranking: Mapping[str, Any]) -> dict[str, An
         "subject": row["subject"],
         "occurred_at": row["occurred_at"],
         "status": row["thread_status"],
-        "outcome_state": row["outcome_state"],
-        "gap_reasons": json.loads(row["gap_reasons_json"] or "[]"),
+        "outcome_state": outcome_state,
+        "gap_reasons": gap_reasons,
         "evidence": json.loads(row["evidence_json"] or "[]"),
+        "advisories": advisories(
+            status=str(row["thread_status"]),
+            gap_reasons=gap_reasons,
+            outcome_state=outcome_state,
+            occurred_at=row["occurred_at"],
+        ),
         "ranking": ranking,
     }
 
