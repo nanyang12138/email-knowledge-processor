@@ -111,10 +111,14 @@ def main(argv: list[str] | None = None) -> int:
 
         connection = connect(args.db)
         try:
-            initialize(connection)
+            schema = initialize(connection)
             if args.command == "init":
                 _print_json(
-                    {"database": str(Path(args.db).resolve()), "status": "ready"}
+                    {
+                        "database": str(Path(args.db).resolve()),
+                        "status": "ready",
+                        **schema,
+                    }
                 )
             elif args.command == "ingest":
                 _print_json(ingest_sources(connection, args.paths, force=args.force))

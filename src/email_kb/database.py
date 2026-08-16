@@ -8,96 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
-CREATE TABLE IF NOT EXISTS source_files (
-    id INTEGER PRIMARY KEY,
-    path TEXT NOT NULL UNIQUE,
-    sha256 TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    modified_ns INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    imported_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    email_id TEXT PRIMARY KEY,
-    internet_message_id TEXT,
-    conversation_id TEXT NOT NULL,
-    parent_folder_id TEXT,
-    received_at_utc TEXT,
-    sent_at_utc TEXT,
-    sender_name TEXT,
-    sender_address TEXT,
-    to_recipients_json TEXT NOT NULL,
-    cc_recipients_json TEXT NOT NULL,
-    bcc_recipients_json TEXT NOT NULL,
-    reply_to_json TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    body TEXT NOT NULL,
-    clean_body TEXT NOT NULL,
-    body_type TEXT,
-    body_preview TEXT,
-    importance TEXT,
-    has_attachments INTEGER NOT NULL,
-    is_read INTEGER NOT NULL,
-    categories_json TEXT NOT NULL,
-    web_link TEXT,
-    body_sha256 TEXT NOT NULL,
-    raw_json TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_conversation
-    ON messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_messages_received
-    ON messages(received_at_utc);
-CREATE INDEX IF NOT EXISTS idx_messages_sender
-    ON messages(sender_address);
-
-CREATE TABLE IF NOT EXISTS message_sources (
-    email_id TEXT NOT NULL REFERENCES messages(email_id) ON DELETE CASCADE,
-    source_file_id INTEGER NOT NULL REFERENCES source_files(id) ON DELETE CASCADE,
-    source_index INTEGER NOT NULL,
-    PRIMARY KEY (email_id, source_file_id)
-);
-
-CREATE TABLE IF NOT EXISTS analysis_runs (
-    id INTEGER PRIMARY KEY,
-    batch_id TEXT NOT NULL,
-    phase TEXT NOT NULL,
-    status TEXT NOT NULL,
-    thread_ids_json TEXT NOT NULL,
-    input_sha256 TEXT NOT NULL,
-    agent_id TEXT,
-    run_id TEXT,
-    model TEXT,
-    output_json TEXT,
-    error TEXT,
-    duration_ms INTEGER,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_analysis_runs_batch
-    ON analysis_runs(batch_id, phase);
-
-CREATE TABLE IF NOT EXISTS thread_analyses (
-    thread_id TEXT PRIMARY KEY,
-    source_fingerprint TEXT NOT NULL,
-    status TEXT NOT NULL,
-    importance_score INTEGER,
-    factual_confidence REAL,
-    extraction_json TEXT,
-    verification_json TEXT,
-    verified_json TEXT,
-    updated_at TEXT NOT NULL
-);
-"""
-
+from .migrations import SCHEMA_VERSION, apply_migrations, current_version
 
 MESSAGE_COLUMNS = (
     "email_id",
@@ -140,9 +51,15 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return connection
 
 
-def initialize(connection: sqlite3.Connection) -> None:
-    connection.executescript(SCHEMA)
-    connection.commit()
+def initialize(connection: sqlite3.Connection) -> dict[str, Any]:
+    connection.executescript("PRAGMA journal_mode = WAL;")
+    before = current_version(connection)
+    applied = apply_migrations(connection)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "previous_version": before,
+        "applied_migrations": applied,
+    }
 
 
 def sha256_file(path: str | Path) -> str:
