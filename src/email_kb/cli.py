@@ -12,6 +12,16 @@ from cursor_sdk import Cursor
 from .analysis import analyze_database
 from .database import connect, database_stats, initialize, quality_report
 from .ingest import ingest_sources
+from .retrieval import (
+    AGENT_VISIBLE_STATUSES,
+    check_prior_attempts,
+    find_similar_cases,
+    get_applicable_rules,
+    get_case,
+    index_knowledge,
+    index_stats,
+    lookup_identifier,
+)
 
 DEFAULT_DATABASE = Path("data") / "knowledge.db"
 
@@ -95,8 +105,58 @@ def _parser() -> argparse.ArgumentParser:
         help="Estimate runs without calling Cursor or changing analysis state",
     )
 
+    subparsers.add_parser(
+        "index", help="Rebuild the case and claim retrieval index from analyses"
+    )
+
+    search = subparsers.add_parser(
+        "search", help="Query the knowledge index the way an agent would"
+    )
+    search.add_argument("query")
+    search.add_argument(
+        "--mode",
+        choices=("cases", "rules", "prior", "identifier"),
+        default="cases",
+        help=(
+            "cases: past problems resembling this situation; "
+            "rules: reusable rules that may apply; "
+            "prior: whether this approach was already tried; "
+            "identifier: exact CL/bug/ticket lookup"
+        ),
+    )
+    search.add_argument("--limit", type=int, default=5)
+    search.add_argument(
+        "--include-partial",
+        action="store_true",
+        help="Also return knowledge that failed validation (excluded by default)",
+    )
+
+    case = subparsers.add_parser(
+        "case", help="Show one case with every validated claim and its evidence"
+    )
+    case.add_argument("thread_id")
+
     subparsers.add_parser("models", help="List Cursor models available to the API key")
     return parser
+
+
+def _search(connection: Any, args: Any) -> Any:
+    statuses = list(AGENT_VISIBLE_STATUSES)
+    if args.include_partial:
+        statuses.append("partial")
+    if args.mode == "cases":
+        return find_similar_cases(
+            connection, args.query, limit=args.limit, statuses=statuses
+        )
+    if args.mode == "rules":
+        return get_applicable_rules(
+            connection, args.query, limit=args.limit, statuses=statuses
+        )
+    if args.mode == "prior":
+        return check_prior_attempts(
+            connection, args.query, limit=args.limit, statuses=statuses
+        )
+    return lookup_identifier(connection, args.query, limit=args.limit)
 
 
 def _list_models() -> list[dict[str, Any]]:
@@ -133,9 +193,18 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "ingest":
                 _print_json(ingest_sources(connection, args.paths, force=args.force))
             elif args.command == "stats":
-                _print_json(database_stats(connection))
+                _print_json(database_stats(connection) | index_stats(connection))
             elif args.command == "report":
                 _print_json(quality_report(connection))
+            elif args.command == "index":
+                _print_json(index_knowledge(connection) | index_stats(connection))
+            elif args.command == "search":
+                _print_json(_search(connection, args))
+            elif args.command == "case":
+                found = get_case(connection, args.thread_id)
+                if found is None:
+                    raise RuntimeError(f"No indexed case for {args.thread_id}")
+                _print_json(found)
             elif args.command == "analyze":
                 _print_json(
                     analyze_database(

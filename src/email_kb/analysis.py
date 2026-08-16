@@ -1047,6 +1047,8 @@ def analyze_database(
         )
         verified = {
             **final,
+            "subject": document["subject"],
+            "participants": document["participants"],
             "agreement": agreement,
             "gap_reasons": gap_reasons,
             "segment_count": len(segments),

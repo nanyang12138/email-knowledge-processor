@@ -129,9 +129,81 @@ ALTER TABLE analysis_runs ADD COLUMN evidence_claims_valid INTEGER;
 """
 
 
+# Claims and cases become first-class rows instead of staying inside a JSON
+# blob, so they can be retrieved, filtered by status, and ranked individually.
+# Everything here is a derived index: it is dropped and rebuilt from
+# thread_analyses, never edited in place.
+RETRIEVAL = """
+CREATE TABLE IF NOT EXISTS claims (
+    claim_uid TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    claim_id TEXT NOT NULL,
+    claim_type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    message_ids_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    thread_status TEXT NOT NULL,
+    importance_score INTEGER,
+    occurred_at TEXT,
+    indexed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_claims_thread ON claims(thread_id);
+CREATE INDEX IF NOT EXISTS idx_claims_type ON claims(claim_type);
+
+CREATE TABLE IF NOT EXISTS cases (
+    thread_id TEXT PRIMARY KEY,
+    thread_status TEXT NOT NULL,
+    category TEXT,
+    importance_score INTEGER,
+    subject TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    situation TEXT NOT NULL,
+    actions TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    outcome_state TEXT NOT NULL,
+    participants_json TEXT NOT NULL,
+    gap_reasons_json TEXT NOT NULL,
+    agreement_score REAL,
+    started_at TEXT,
+    ended_at TEXT,
+    indexed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(thread_status);
+
+CREATE TABLE IF NOT EXISTS identifiers (
+    value TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    claim_uid TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (value, thread_id, claim_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_identifiers_value ON identifiers(value);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
+    claim_uid UNINDEXED,
+    thread_id UNINDEXED,
+    body,
+    tokenize = 'unicode61'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS cases_fts USING fts5(
+    thread_id UNINDEXED,
+    situation,
+    actions,
+    outcome,
+    summary,
+    tokenize = 'unicode61'
+);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline", BASELINE),
     (2, "independent_passes", INDEPENDENT_PASSES),
+    (3, "retrieval", RETRIEVAL),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
