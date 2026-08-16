@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "email-knowledge-processor"
+version = "0.1.0"
+description = "Auditable email-to-knowledge pipeline using Cursor SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cursor-sdk>=1.0.28,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.16.3,<1",
+]
+
+[project.scripts]
+email-kb = "email_kb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

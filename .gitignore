@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+.env
+
+# Generated databases and agent work files
+data/
+work/
+*.db
+*.db-shm
+*.db-wal
+
+# Never commit exported corporate mail
+RawJSON/
+CSV/
+EmailKB_*.csv
+EmailKB_*.json
