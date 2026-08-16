@@ -11,6 +11,13 @@ from cursor_sdk import Cursor
 
 from .analysis import analyze_database
 from .database import connect, database_stats, initialize, quality_report
+from .evaluation import (
+    card_coverage,
+    load_experience_cards,
+    load_replay_tasks,
+    replay_prompts,
+    run_replay,
+)
 from .feedback import VERDICTS, feedback_stats, record_feedback, review_queue
 from .ingest import ingest_sources
 from .retrieval import (
@@ -150,8 +157,67 @@ def _parser() -> argparse.ArgumentParser:
     mark.add_argument("verdict", choices=VERDICTS)
     mark.add_argument("--note", help="Why, in your own words")
 
+    cards = subparsers.add_parser(
+        "cards",
+        help="Check what the pipeline finds for each experience card you wrote",
+    )
+    cards.add_argument(
+        "--path",
+        type=Path,
+        default=Path("evaluation") / "experience_cards.toml",
+        help="TOML file of hand-written experience cards",
+    )
+    cards.add_argument("--limit", type=int, default=3)
+
+    replay = subparsers.add_parser(
+        "replay",
+        help="Answer past problems with and without the knowledge base, and compare",
+    )
+    replay.add_argument(
+        "--path",
+        type=Path,
+        default=Path("evaluation") / "decision_replay.toml",
+        help="TOML file of decision replay tasks",
+    )
+    replay.add_argument("--model", default="auto")
+    replay.add_argument("--limit", type=int, default=5)
+    replay.add_argument(
+        "--prompts-only",
+        action="store_true",
+        help="Show the two prompts and what was retrieved, without calling a model",
+    )
+    replay.add_argument(
+        "--out",
+        type=Path,
+        help="Write the full report, including both responses, to this file",
+    )
+
     subparsers.add_parser("models", help="List Cursor models available to the API key")
     return parser
+
+
+def _replay(connection: Any, args: Any) -> Any:
+    tasks = load_replay_tasks(args.path)
+    if args.prompts_only:
+        return [replay_prompts(connection, task, limit=args.limit) for task in tasks]
+    api_key = os.environ.get("CURSOR_API_KEY")
+    if not api_key:
+        raise RuntimeError("CURSOR_API_KEY is not set")
+    report = run_replay(
+        connection,
+        tasks,
+        model=args.model,
+        workspace=Path.cwd(),
+        api_key=api_key,
+        limit=args.limit,
+    )
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {**report["summary"], "report": str(args.out)}
+    return report
 
 
 def _search(connection: Any, args: Any) -> Any:
@@ -212,6 +278,16 @@ def main(argv: list[str] | None = None) -> int:
                     | index_stats(connection)
                     | feedback_stats(connection)
                 )
+            elif args.command == "cards":
+                _print_json(
+                    card_coverage(
+                        connection,
+                        load_experience_cards(args.path),
+                        limit=args.limit,
+                    )
+                )
+            elif args.command == "replay":
+                _print_json(_replay(connection, args))
             elif args.command == "review":
                 _print_json(review_queue(connection, limit=args.limit))
             elif args.command == "mark":

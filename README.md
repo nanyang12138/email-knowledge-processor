@@ -266,6 +266,31 @@ API Key 配置完成后查看当前账户实际可用的模型：
 "先看看这个人以前怎么做的"这一步。排序信号里包含**这条经验过去的结果是好是坏**，
 这是纯文档检索无法表达的。
 
+## 8. 判断它到底有没有用
+
+上面所有指标衡量的都是**忠实度**——引用是否存在、两次盲跑是否一致。这些可以
+全部达标而系统对你毫无价值。要判断有没有用，需要两份只有你能写的文件，见
+[evaluation/README.md](evaluation/README.md)：
+
+- **经验卡**：手写 10 到 20 条你真实拥有的规则。有了目标形态，抽取才从"总结
+  线程"变成"重建这些卡片"这种有标准答案的任务。
+- **决策回放集**：30 到 50 个你已知结局的真实问题，按当时的样子描述。
+
+```powershell
+# 手写的经验卡，流水线自己能找到什么
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db cards `
+  --path evaluation\experience_cards.toml
+
+# A/B：同一个模型，分别在有和没有知识库的条件下回答同一批过去的问题
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db replay `
+  --path evaluation\decision_replay.toml --model "<model-id>" `
+  --out evaluation\reports\replay-001.json
+```
+
+`mean_coverage_delta` 就是这个项目的全部价值。回放时**在 `asked_at` 当时或之后
+才结束的线程会被整条排除**，否则答案会顺着一条后来才结束的线程漏回问题里，
+整个对照就失去意义。
+
 ## 开发自检
 
 ```powershell

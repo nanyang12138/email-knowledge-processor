@@ -50,6 +50,18 @@ class TokenizerTests(unittest.TestCase):
             ["构建", "建失", "失败", "build", "12345"],
         )
 
+    def test_sentence_punctuation_is_not_part_of_a_word(self) -> None:
+        self.assertEqual(
+            search_tokens("Compare machine images."),
+            ["compare", "machine", "images"],
+        )
+
+    def test_identifiers_keep_their_internal_punctuation(self) -> None:
+        self.assertEqual(
+            search_tokens("See PROJ-42, cl/12345 and v1.2.3."),
+            ["see", "proj-42", "cl/12345", "and", "v1.2.3"],
+        )
+
 
 class IdentifierTests(unittest.TestCase):
     def test_extracts_common_identifier_shapes(self) -> None:
@@ -214,6 +226,27 @@ class IndexTests(unittest.TestCase):
         results = find_similar_cases(self.connection, "构建失败")
 
         self.assertEqual([item["thread_id"] for item in results], ["thread-cn"])
+
+    def test_rules_are_reachable_by_the_situation_they_apply_to(self) -> None:
+        # The rule's own wording shares no vocabulary with the situation, so
+        # this only works if claims are indexed with their case's context.
+        self.save(
+            "thread-1",
+            subject="Nightly build failure",
+            claims=[
+                claim("c1", "problem", "The nightly build failed on Windows.", "m1"),
+                claim(
+                    "c2", "reusable_rule", "Pin the toolchain before bisecting.", "m1"
+                ),
+            ],
+        )
+        index_knowledge(self.connection)
+
+        rules = get_applicable_rules(
+            self.connection, "the nightly build started failing on Windows"
+        )
+
+        self.assertEqual([rule["claim_uid"] for rule in rules], ["thread-1:c2"])
 
     def test_prior_attempts_only_returns_actions_and_decisions(self) -> None:
         self.save(

@@ -230,11 +230,32 @@ WHERE outer_feedback.id = (
 """
 
 
+# A rule states what to do, not when it applies, so matching a description of
+# the current situation against the rule's own wording finds nothing. Indexing
+# each claim alongside the situation of the case it came from makes rules
+# reachable by the circumstances they were formed under.
+#
+# A virtual table cannot be altered, so the index is dropped and recreated. It
+# is derived, and 'index' rebuilds it.
+CLAIM_CONTEXT = """
+DROP TABLE IF EXISTS claims_fts;
+
+CREATE VIRTUAL TABLE claims_fts USING fts5(
+    claim_uid UNINDEXED,
+    thread_id UNINDEXED,
+    body,
+    context,
+    tokenize = 'unicode61'
+);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline", BASELINE),
     (2, "independent_passes", INDEPENDENT_PASSES),
     (3, "retrieval", RETRIEVAL),
     (4, "feedback", FEEDBACK),
+    (5, "claim_context", CLAIM_CONTEXT),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

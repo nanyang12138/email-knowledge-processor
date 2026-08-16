@@ -35,7 +35,20 @@ _CJK = (
     "\uf900-\ufaff"  # compatibility ideographs
 )
 _CJK_RUN = re.compile(f"[{_CJK}]+")
+# Identifiers keep their internal punctuation so cl/12345 and PROJ-42 survive
+# as single tokens, but trailing punctuation is sentence structure, not part of
+# the word.
 _LATIN_TOKEN = re.compile(r"[0-9A-Za-z_][0-9A-Za-z_.\-/#]*")
+_TRAILING_PUNCTUATION = "./-#"
+
+
+def _latin_tokens(value: str) -> list[str]:
+    found = (
+        token.casefold().rstrip(_TRAILING_PUNCTUATION)
+        for token in _LATIN_TOKEN.findall(value)
+    )
+    return [token for token in found if token]
+
 
 _IDENTIFIER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("cl", re.compile(r"\bcl[\s/#-]?(\d{4,})\b", re.IGNORECASE)),
@@ -58,18 +71,15 @@ def search_tokens(value: str) -> list[str]:
     tokens: list[str] = []
     position = 0
     for match in _CJK_RUN.finditer(value):
-        tokens.extend(
-            token.casefold()
-            for token in _LATIN_TOKEN.findall(value[position : match.start()])
-        )
+        tokens.extend(_latin_tokens(value[position : match.start()]))
         run = match.group(0)
         if len(run) == 1:
             tokens.append(run)
         else:
             tokens.extend(run[index : index + 2] for index in range(len(run) - 1))
         position = match.end()
-    tokens.extend(token.casefold() for token in _LATIN_TOKEN.findall(value[position:]))
-    return [token for token in tokens if token]
+    tokens.extend(_latin_tokens(value[position:]))
+    return tokens
 
 
 def index_text(value: str) -> str:
@@ -268,9 +278,16 @@ def index_knowledge(
                     ),
                 )
                 connection.execute(
-                    "INSERT INTO claims_fts (claim_uid, thread_id, body) "
-                    "VALUES (?, ?, ?)",
-                    (claim_uid, thread_id, index_text(text)),
+                    """
+                    INSERT INTO claims_fts (claim_uid, thread_id, body, context)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        claim_uid,
+                        thread_id,
+                        index_text(text),
+                        index_text(f"{subject}\n{situation}"),
+                    ),
                 )
                 indexed_claims += 1
                 for identifier in extract_identifiers(text):
@@ -463,12 +480,20 @@ def find_similar_cases(
     *,
     limit: int = 5,
     statuses: Sequence[str] = AGENT_VISIBLE_STATUSES,
+    before: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Find past cases whose *problem* resembles the situation described."""
+    """
+    Find past cases whose *problem* resembles the situation described.
+
+    `before` excludes any case still running at that moment, not merely one
+    that started later. Replaying a past decision is only meaningful if the
+    answer cannot leak back through a thread that concluded afterwards.
+    """
     expression = _match_expression(situation)
     if not expression:
         return []
     placeholders = ", ".join("?" for _ in statuses)
+    cutoff = "AND cases.ended_at < ?" if before else ""
     rows = connection.execute(
         f"""
         SELECT cases.*, owner.verdict AS owner_feedback,
@@ -480,10 +505,16 @@ def find_similar_cases(
         WHERE cases_fts MATCH ?
           AND cases.thread_status IN ({placeholders})
           AND COALESCE(owner.verdict, '') <> 'wrong'
+          {cutoff}
         ORDER BY relevance DESC
         LIMIT ?
         """,
-        (expression, *statuses, max(limit * 5, limit)),
+        (
+            expression,
+            *statuses,
+            *([before] if before else []),
+            max(limit * 5, limit),
+        ),
     ).fetchall()
 
     results = [
@@ -512,12 +543,14 @@ def _claim_rows(
     *,
     limit: int,
     statuses: Sequence[str],
+    before: str | None = None,
 ) -> list[sqlite3.Row]:
     expression = _match_expression(query)
     if not expression:
         return []
     type_placeholders = ", ".join("?" for _ in types)
     status_placeholders = ", ".join("?" for _ in statuses)
+    cutoff = "AND claims.occurred_at < ?" if before else ""
     # A claim inherits its case's verdict when it has none of its own, so
     # rejecting a whole case also removes the claims drawn from it.
     return connection.execute(
@@ -525,7 +558,7 @@ def _claim_rows(
         SELECT claims.*, cases.outcome_state, cases.gap_reasons_json,
                cases.agreement_score, cases.subject,
                COALESCE(on_claim.verdict, on_case.verdict) AS owner_feedback,
-               -bm25(claims_fts) AS relevance
+               -bm25(claims_fts, 0.0, 0.0, 5.0, 1.0) AS relevance
         FROM claims_fts
         JOIN claims ON claims.claim_uid = claims_fts.claim_uid
         LEFT JOIN cases ON cases.thread_id = claims.thread_id
@@ -539,10 +572,17 @@ def _claim_rows(
           AND claims.thread_status IN ({status_placeholders})
           AND COALESCE(on_claim.verdict, '') <> 'wrong'
           AND COALESCE(on_case.verdict, '') <> 'wrong'
+          {cutoff}
         ORDER BY relevance DESC
         LIMIT ?
         """,
-        (expression, *types, *statuses, max(limit * 5, limit)),
+        (
+            expression,
+            *types,
+            *statuses,
+            *([before] if before else []),
+            max(limit * 5, limit),
+        ),
     ).fetchall()
 
 
@@ -599,9 +639,12 @@ def get_applicable_rules(
     *,
     limit: int = 5,
     statuses: Sequence[str] = AGENT_VISIBLE_STATUSES,
+    before: str | None = None,
 ) -> list[dict[str, Any]]:
     """Reusable rules, exceptions, and preferences that may apply right now."""
-    rows = _claim_rows(connection, context, RULE_TYPES, limit=limit, statuses=statuses)
+    rows = _claim_rows(
+        connection, context, RULE_TYPES, limit=limit, statuses=statuses, before=before
+    )
     return _ranked_claims(rows, limit=limit)
 
 
@@ -611,10 +654,16 @@ def check_prior_attempts(
     *,
     limit: int = 5,
     statuses: Sequence[str] = AGENT_VISIBLE_STATUSES,
+    before: str | None = None,
 ) -> list[dict[str, Any]]:
     """Past actions and decisions resembling an approach under consideration."""
     rows = _claim_rows(
-        connection, approach, ACTION_TYPES, limit=limit, statuses=statuses
+        connection,
+        approach,
+        ACTION_TYPES,
+        limit=limit,
+        statuses=statuses,
+        before=before,
     )
     return _ranked_claims(rows, limit=limit)
 
