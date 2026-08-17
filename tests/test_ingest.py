@@ -394,12 +394,15 @@ class SourceSurveyTests(unittest.TestCase):
         self.assertEqual(survey["advice"], [])
         self.assertTrue(survey["ready"])
 
-    def test_both_columns_present_says_which_one_wins(self) -> None:
+    def test_both_columns_present_is_a_note_not_a_blocker(self) -> None:
         self.write("mail.csv", "id,body,bodyPreview\n")
 
         survey = survey_sources([self.root])
 
-        self.assertTrue(any("preview is ignored" in note for note in survey["advice"]))
+        # Worth knowing, but it must not stop an import.
+        self.assertTrue(survey["ready"])
+        self.assertEqual(survey["advice"], [])
+        self.assertTrue(any("preview is ignored" in note for note in survey["notes"]))
 
     def test_raw_json_alongside_csv_silences_the_column_warning(self) -> None:
         self.write("mail.csv", "id,subject,bodyPreview\n")

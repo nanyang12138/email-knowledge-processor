@@ -78,10 +78,11 @@ KB="$VENV/bin/python -m email_kb"
 say "Checking the export is complete before importing it"
 SURVEY="$($KB check-source "$SOURCE")"
 echo "$SURVEY"
-"$VENV/bin/python" - "$SURVEY" <<'PY' || die "Fix the points above, then run this again."
+# Only `advice` blocks. `notes` are observations worth reading that do not stop
+# an import.
+"$VENV/bin/python" - "$SURVEY" <<'PY' || die "Fix the points under \"advice\" above, then run this again."
 import json, sys
-survey = json.loads(sys.argv[1])
-sys.exit(0 if survey["ready"] and not survey["advice"] else 1)
+sys.exit(0 if json.loads(sys.argv[1])["ready"] else 1)
 PY
 
 mkdir -p "$(dirname "$DATABASE")"

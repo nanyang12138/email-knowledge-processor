@@ -74,6 +74,13 @@ def survey_sources(paths: Iterable[str | Path]) -> dict[str, Any]:
         skip=set(placeholders),
     )
     has_json = any(path.suffix.casefold() == ".json" for path in supported)
+    advice, notes = _survey_advice(
+        supported,
+        placeholders,
+        missing,
+        csv_columns=csv_columns,
+        has_json=has_json,
+    )
     return {
         "files_supported": len(supported),
         "files_unsupported": len(unsupported),
@@ -83,14 +90,11 @@ def survey_sources(paths: Iterable[str | Path]) -> dict[str, Any]:
         "files_not_downloaded": len(placeholders),
         "not_downloaded_examples": [str(path) for path in placeholders[:5]],
         "csv_columns": sorted(csv_columns) if csv_columns else [],
-        "ready": not missing and bool(supported) and not placeholders,
-        "advice": _survey_advice(
-            supported,
-            placeholders,
-            missing,
-            csv_columns=csv_columns,
-            has_json=has_json,
-        ),
+        # `ready` is the only thing a caller should gate on. `advice` must be
+        # fixed; `notes` are worth reading and block nothing.
+        "ready": not advice,
+        "advice": advice,
+        "notes": notes,
     }
 
 
@@ -120,8 +124,9 @@ def _survey_advice(
     *,
     csv_columns: set[str],
     has_json: bool,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     advice: list[str] = []
+    notes: list[str] = []
     if missing:
         advice.append(f"These paths do not exist: {', '.join(missing)}")
     if not supported:
@@ -149,11 +154,11 @@ def _survey_advice(
                 "export."
             )
         elif csv_columns & PREVIEW_COLUMNS:
-            advice.append(
+            notes.append(
                 "These CSV files carry both a body and a preview column. The "
                 "body column is used; the preview is ignored."
             )
-    return advice
+    return advice, notes
 
 
 def _json_dump(value: Any) -> str:
