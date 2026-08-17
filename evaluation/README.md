@@ -11,48 +11,116 @@ claim，同样可以是一句废话。
 
 真实文件是 gitignore 的，只有 `*.example.toml` 会进仓库。
 
+## 你要做的是"审"，不是"写"
+
+两份文件都能由系统从邮件里自动生成。你的工作是**审阅**：一张卡从零写要十几
+分钟，扫一眼判断要十几秒。
+
+但有一件事自动化替代不了，需要先说清楚，否则会得到一个看起来很好看的假数字。
+
+经验卡承担两个作用：**给抽取一个目标形态**，和**当评估基准**。第一个作用自动
+生成完全够用。第二个不行——如果卡片由流水线生成，再去测流水线能不能找到这些
+卡片，那是拿自己的答案批自己的卷子。
+
+所以 `cards` 命令会明确返回 `baseline_valid`：只有经你确认过的卡片才算基准。
+让一张卡成为金标准的是**人的判断**，不是谁敲的字，所以"点认可"和"手写"在评估
+上等价。
+
+回放集**不存在这个问题**：答案来自邮件里事发之后的部分，而那部分会被截断规则
+整条排除在检索之外，两个对照组谁都拿不到自己的答案。所以它可以放心自动生成，
+你只要抽查一下就行。
+
 ## 1. 经验卡（`experience_cards.toml`）
 
-**先写这个，再写代码。**
-
 现在两次抽取会产出粒度不同的结果，根因不是缺少某个流水线阶段，而是"一条经验"
-从来没有被定义过。在没有目标形态的情况下，加多少轮复核输出都会继续漂移，因为
-模型没有可对齐的东西。
+从来没有被定义过。在没有目标形态的情况下，加多少轮复核输出都会继续漂移。
 
-手写 10 到 20 张你**真实拥有**的经验卡之后，抽取任务就从"总结这个线程"变成
-"从原始邮件里重建出这些卡片"——一个有标准答案、可以打分的任务。
+### 先让系统归纳
 
-写的时候：
+```powershell
+# 先只看聚类，不调模型。重复出现的情况会被聚成一簇
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db induce --dry-run
 
-- **凭记忆写，不要边看知识库边写。** 需要查才想起来的，不是你拥有的经验。
-- `situation` 写**适用条件**，不要写做法。检索是拿它去匹配的。
-- `rationale` 是最有价值也最难的一栏，因为决策理由几乎从不出现在邮件里。
-- 没有 `counterexamples` 的规则通常是没写清楚，不是没有例外。
-- 难写的那几张往往最值钱，因为它们正是从来没写给任何人看过的隐性经验。
+# 每簇归纳出候选规则
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db induce --model "<model-id>"
+```
+
+聚类是**确定性**的，谁和谁被分到一起可以复现和检查。dry run 会给出每簇内部的
+相似度，`--min-similarity` 照着这个数调，不用猜。默认阈值偏松，因为归纳提示词
+的职责之一就是把"表面相似但机制不同"的案例拆开——一个从来没送进模型的簇是没有
+机会被拆的。
+
+只有**措辞**来自模型。哪些案例支持它、哪些是反例、其中多少条真的有记录到结果，
+全部由程序统计。`basis` 为 `pattern_without_recorded_outcome` 表示这是一个有人
+注意到的规律，不是已知有效的做法。
+
+### 然后审
+
+```powershell
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db rules
+
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mark "<rule-id>" useful
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mark "<rule-id>" wrong --note "两个不同问题硬凑的"
+```
+
+| 判断 | 含义 |
+| --- | --- |
+| `useful` | 认可，这是我的经验，进入基准 |
+| `not_useful` | 太琐碎，不值得当规则 |
+| `wrong` | 归纳错了 |
+| `outdated` | 曾经对，现在不适用 |
+
+导出成可编辑的卡片文件，**改比认更有价值**——你改动的地方正是只有你能补的部分：
+
+```powershell
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db export cards `
+  --out evaluation\experience_cards.toml
+```
+
+导出的卡片里 `rationale` 多半是空的。决策理由几乎从不出现在邮件里，这一栏基本
+只能靠你补。补上去的每一句都是知识库里原本不可能有的东西。
+
+### 再看流水线自己能找到什么
 
 ```powershell
 .\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db cards `
   --path evaluation\experience_cards.toml
 ```
 
-输出的是**候选**，不是判定。检索到的规则是不是同一条规则，只有你能判断；
-在这里自动打分只会制造一个没有意义的数字。`cards_with_no_candidate` 是最有
-信息量的一栏：那些卡片对应的经验，邮件里可能根本不存在。
+输出的是**候选**，不是判定。检索到的规则是不是同一条规则只有你能判断，自动打分
+只会制造一个没有意义的数字。`cards_with_no_candidate` 是最有信息量的一栏：那些
+卡片对应的经验，邮件里可能根本不存在。
 
 ## 2. 决策回放集（`decision_replay.toml`）
 
-这是唯一直接对应产品目标的测量。
+这是唯一直接对应产品目标的测量，而且可以几乎全自动生成。
 
-1. 挑一个你**已经知道结局**的真实问题。
-2. `situation` 按**当时的样子**写，不要带任何事后视角。掺入后见之明是让整个
-   测试失去意义最容易的方式。
-3. `asked_at` 设成结局揭晓之前的那一刻。**在这个时刻或之后才结束的线程会被
-   整条排除**，所以答案不会顺着一条后来才结束的线程漏回来。
-4. `expected_elements` 列出当时**真正起作用的东西**，写要点不写整句，因为打分
-   是按这些要点算的。
+```powershell
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db export replay `
+  --out evaluation\decision_replay.toml
+```
 
-30 到 50 个任务能给出可用信号。更少也值得跑：哪怕只有 5 个，也足以告诉你检索
-出来的东西是不是完全不相关。
+系统会挑出**同时记录了问题、行动和结果**的案例。`situation`、`asked_at`（结局
+被记录下来的那一刻）和 `what_actually_happened` 都能从已验证的 claim 直接得到。
+
+打开文件抽查两件事，这两件机器判断不了：
+
+- `expected_elements` 是不是**真正起作用**的东西。系统填的是"邮件里说做了什么"，
+  这和"什么起了作用"不总是一回事。
+- `situation` 有没有掺进事后视角。
+
+**不值得测的直接删掉。** 一个你信得过的小集合，胜过一个你没读过的大集合。
+
+然后跑：
+
+```powershell
+# 先只看检索到了什么、两份提示词长什么样，不调用模型
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db replay --prompts-only
+
+# 真正的 A/B：同一个模型分别在有和没有知识库的条件下作答
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db replay `
+  --model "<model-id>" --out evaluation\reports\replay-001.json
+```
 
 ```powershell
 # 先只看检索到了什么、两份提示词长什么样，不调用模型
@@ -69,6 +137,9 @@ claim，同样可以是一句废话。
 `mean_coverage_delta` 就是这个项目的全部价值。打分是确定性的要点覆盖，不是
 模型评判——这样换模型之后前后两次结果仍然可比。完整报告里保留了两个条件下的
 原始回答，覆盖率毕竟只是个摘要，不认同它的时候必须能翻回去看原文。
+
+回放时**在 `asked_at` 当时或之后才结束的线程会被整条排除**（不只是晚开始的），
+否则答案会顺着一条后来才结束的线程漏回问题里，整个对照就失去意义。
 
 ## 3. 读结果
 

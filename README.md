@@ -266,30 +266,54 @@ API Key 配置完成后查看当前账户实际可用的模型：
 "先看看这个人以前怎么做的"这一步。排序信号里包含**这条经验过去的结果是好是坏**，
 这是纯文档检索无法表达的。
 
-## 8. 判断它到底有没有用
+## 8. 跨案例归纳
 
-上面所有指标衡量的都是**忠实度**——引用是否存在、两次盲跑是否一致。这些可以
-全部达标而系统对你毫无价值。要判断有没有用，需要两份只有你能写的文件，见
-[evaluation/README.md](evaluation/README.md)：
-
-- **经验卡**：手写 10 到 20 条你真实拥有的规则。有了目标形态，抽取才从"总结
-  线程"变成"重建这些卡片"这种有标准答案的任务。
-- **决策回放集**：30 到 50 个你已知结局的真实问题，按当时的样子描述。
+三条几乎相同的自动通知应该变成**一条规则加三个实例**，而不是三张知识卡。
+没有这一步，重复通知会靠数量淹没知识库，而真正值得留下的那条规则哪儿都没写。
 
 ```powershell
-# 手写的经验卡，流水线自己能找到什么
-.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db cards `
-  --path evaluation\experience_cards.toml
+# 先只看聚类，不调模型
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db induce --dry-run
+
+# 归纳候选规则，然后审阅
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db induce --model "<model-id>"
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db rules
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mark "<rule-id>" useful
+```
+
+聚类是**确定性**的，谁和谁被分到一起可以复现；dry run 会给出每簇内部相似度，
+`--min-similarity` 照着调而不用猜。只有**措辞**来自模型——支持案例、反例、
+其中有多少条真的记录了结果，都由程序统计。`basis` 为
+`pattern_without_recorded_outcome` 表示这是个规律，不是已知有效的做法。
+
+## 9. 判断它到底有没有用
+
+上面所有指标衡量的都是**忠实度**——引用是否存在、两次盲跑是否一致。这些可以
+全部达标而系统对你毫无价值。完整流程见
+[evaluation/README.md](evaluation/README.md)，这里只说要点。
+
+两份评估文件都能自动生成，你的工作是**审**不是**写**：
+
+```powershell
+# 已认可的规则导出成可编辑的经验卡
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db export cards `
+  --out evaluation\experience_cards.toml
+
+# 从记录了问题、行动和结果的案例生成回放任务
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db export replay `
+  --out evaluation\decision_replay.toml
 
 # A/B：同一个模型，分别在有和没有知识库的条件下回答同一批过去的问题
 .\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db replay `
-  --path evaluation\decision_replay.toml --model "<model-id>" `
-  --out evaluation\reports\replay-001.json
+  --model "<model-id>" --out evaluation\reports\replay-001.json
 ```
 
-`mean_coverage_delta` 就是这个项目的全部价值。回放时**在 `asked_at` 当时或之后
-才结束的线程会被整条排除**，否则答案会顺着一条后来才结束的线程漏回问题里，
-整个对照就失去意义。
+`mean_coverage_delta` 就是这个项目的全部价值。
+
+有一件事自动化替代不了：**未经你确认的卡片不能当评估基准**，因为那是拿流水线
+自己的答案批流水线自己的卷子，所以 `cards` 会返回 `baseline_valid`。回放集没有
+这个问题——答案来自事发之后的邮件，而**在 `asked_at` 当时或之后才结束的线程会被
+整条排除**在检索之外，两个对照组谁都拿不到自己的答案。
 
 ## 开发自检
 

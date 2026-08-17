@@ -12,13 +12,22 @@ from cursor_sdk import Cursor
 from .analysis import analyze_database
 from .database import connect, database_stats, initialize, quality_report
 from .evaluation import (
+    accepted_cards,
     card_coverage,
+    dump_toml,
     load_experience_cards,
     load_replay_tasks,
+    propose_replay_tasks,
     replay_prompts,
     run_replay,
 )
 from .feedback import VERDICTS, feedback_stats, record_feedback, review_queue
+from .induction import (
+    DEFAULT_MIN_SIMILARITY,
+    induce_rules,
+    list_rules,
+    rule_stats,
+)
 from .ingest import ingest_sources
 from .retrieval import (
     AGENT_VISIBLE_STATUSES,
@@ -157,15 +166,64 @@ def _parser() -> argparse.ArgumentParser:
     mark.add_argument("verdict", choices=VERDICTS)
     mark.add_argument("--note", help="Why, in your own words")
 
+    induce = subparsers.add_parser(
+        "induce",
+        help="Group recurring cases and induce candidate rules from them",
+    )
+    induce.add_argument("--model", default="auto")
+    induce.add_argument("--limit", type=int, help="Maximum clusters to process")
+    induce.add_argument(
+        "--max-cluster",
+        type=int,
+        default=8,
+        help="Largest group of cases considered one recurring situation",
+    )
+    induce.add_argument(
+        "--min-similarity",
+        type=float,
+        default=DEFAULT_MIN_SIMILARITY,
+        help="How alike two situations must be to be grouped. Read the "
+        "similarity figures in a dry run before changing this.",
+    )
+    induce.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the clusters and what would be sent, without calling a model",
+    )
+
+    rules = subparsers.add_parser(
+        "rules", help="Review induced rules and decide which are yours"
+    )
+    rules.add_argument(
+        "--status",
+        choices=("unreviewed", "accepted", "rejected", "all"),
+        default="unreviewed",
+    )
+    rules.add_argument("--limit", type=int, default=50)
+
+    export = subparsers.add_parser(
+        "export",
+        help="Write accepted rules or generated replay tasks to an editable file",
+    )
+    export.add_argument("what", choices=("cards", "replay"))
+    export.add_argument("--out", type=Path, required=True)
+    export.add_argument("--limit", type=int, default=50)
+
     cards = subparsers.add_parser(
         "cards",
-        help="Check what the pipeline finds for each experience card you wrote",
+        help="Check what the pipeline finds on its own for each experience card",
+    )
+    cards.add_argument(
+        "--source",
+        choices=("file", "accepted"),
+        default="file",
+        help="file: cards you wrote or edited; accepted: induced rules you accepted",
     )
     cards.add_argument(
         "--path",
         type=Path,
         default=Path("evaluation") / "experience_cards.toml",
-        help="TOML file of hand-written experience cards",
+        help="TOML file of experience cards, when --source is file",
     )
     cards.add_argument("--limit", type=int, default=3)
 
@@ -194,6 +252,64 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("models", help="List Cursor models available to the API key")
     return parser
+
+
+CARD_HEADER = """
+# Experience cards accepted from induced rules.
+#
+# Edit these freely. A card you corrected is worth more than one you accepted
+# as written, because the correction is the part only you can supply.
+"""
+
+REPLAY_HEADER = """
+# Replay tasks generated from cases that recorded a result.
+#
+# Read each one before trusting the numbers it produces. Two things need your
+# eye: whether expected_elements are what actually mattered rather than merely
+# what got done, and whether the situation reads as it did at the time instead
+# of with hindsight folded in.
+#
+# Delete the ones that are not worth measuring. A small set you believe in
+# beats a large one you have not read.
+"""
+
+
+def _induce(connection: Any, args: Any) -> Any:
+    api_key = os.environ.get("CURSOR_API_KEY")
+    if not api_key and not args.dry_run:
+        raise RuntimeError("CURSOR_API_KEY is not set")
+    return induce_rules(
+        connection,
+        workspace=Path.cwd(),
+        api_key=api_key or "",
+        model=args.model,
+        limit=args.limit,
+        max_cluster=args.max_cluster,
+        min_similarity=args.min_similarity,
+        dry_run=args.dry_run,
+    ) | ({} if args.dry_run else rule_stats(connection))
+
+
+def _export(connection: Any, args: Any) -> Any:
+    if args.what == "cards":
+        entries = accepted_cards(connection)
+        key, header = "card", CARD_HEADER
+        if not entries:
+            raise RuntimeError(
+                "No accepted rules yet. Run 'induce', then 'rules' to review "
+                "them and 'mark <rule-id> useful' to accept."
+            )
+    else:
+        entries = propose_replay_tasks(connection, limit=args.limit)
+        key, header = "task", REPLAY_HEADER
+        if not entries:
+            raise RuntimeError(
+                "No case has both a recorded action and a recorded outcome yet, "
+                "so there is nothing to replay."
+            )
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(dump_toml(entries, key=key, header=header), encoding="utf-8")
+    return {"written": str(args.out), key: len(entries)}
 
 
 def _replay(connection: Any, args: Any) -> Any:
@@ -278,12 +394,26 @@ def main(argv: list[str] | None = None) -> int:
                     | index_stats(connection)
                     | feedback_stats(connection)
                 )
+            elif args.command == "induce":
+                _print_json(_induce(connection, args))
+            elif args.command == "rules":
+                _print_json(
+                    list_rules(connection, status=args.status, limit=args.limit)
+                )
+            elif args.command == "export":
+                _print_json(_export(connection, args))
             elif args.command == "cards":
+                from_file = args.source == "file"
                 _print_json(
                     card_coverage(
                         connection,
-                        load_experience_cards(args.path),
+                        (
+                            load_experience_cards(args.path)
+                            if from_file
+                            else accepted_cards(connection)
+                        ),
                         limit=args.limit,
+                        reviewed=True,
                     )
                 )
             elif args.command == "replay":

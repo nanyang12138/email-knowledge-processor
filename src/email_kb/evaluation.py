@@ -45,7 +45,12 @@ CARD_OPTIONAL = (
     "counterexamples",
 )
 TASK_REQUIRED = ("id", "situation", "asked_at", "expected_elements")
-TASK_OPTIONAL = ("what_actually_happened", "what_worked", "notes")
+TASK_OPTIONAL = (
+    "what_actually_happened",
+    "what_worked",
+    "notes",
+    "source_thread_id",
+)
 
 ELEMENT_COVERAGE_THRESHOLD = 0.7
 
@@ -113,6 +118,64 @@ def load_replay_tasks(path: str | Path) -> list[dict[str, Any]]:
         optional=TASK_OPTIONAL,
         label="task",
     )
+
+
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def _toml_basic(value: str) -> str:
+    escaped = "".join(_TOML_ESCAPES.get(character, character) for character in value)
+    return f'"{escaped}"'
+
+
+def _toml_multiline(value: str) -> str:
+    # Newlines stay literal so the file reads well; every quote is escaped so
+    # neither an internal run of three nor a trailing one can close the string
+    # early. TOML drops the newline right after the opening delimiter, so the
+    # value round-trips unchanged.
+    escaped = "".join(
+        character if character == "\n" else _TOML_ESCAPES.get(character, character)
+        for character in value
+    )
+    return f'"""\n{escaped}"""'
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        items = ",\n".join(f"  {_toml_basic(str(item))}" for item in value)
+        return f"[\n{items},\n]" if items else "[]"
+    text = str(value)
+    return _toml_multiline(text) if "\n" in text else _toml_basic(text)
+
+
+def dump_toml(entries: Sequence[Mapping[str, Any]], *, key: str, header: str) -> str:
+    """
+    Write entries in the hand-editable format the loaders read back.
+
+    Generated files are meant to be opened and corrected, so they go through
+    the same format as hand-written ones rather than a separate machine format.
+    """
+    lines = [line.rstrip() for line in header.strip().splitlines()]
+    for entry in entries:
+        lines.append("")
+        lines.append(f"[[{key}]]")
+        for field, value in entry.items():
+            if value is None or value == [] or value == "":
+                continue
+            lines.append(f"{field} = {_toml_value(value)}")
+    return "\n".join(lines).strip() + "\n"
 
 
 def element_coverage(expected: Sequence[str], response: str) -> dict[str, Any]:
@@ -334,18 +397,116 @@ def run_replay(
     }
 
 
+def propose_replay_tasks(
+    connection: sqlite3.Connection, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """
+    Derive replay tasks from cases that recorded a problem, an action, and a
+    result.
+
+    Writing these by hand is the slowest part of setting up an evaluation, and
+    almost all of it is mechanical: the situation, the moment before the
+    resolution, and what actually happened are already in the validated claims.
+
+    Unlike experience cards, generating these does not make the evaluation
+    circular. The answer comes from the part of the thread that follows the
+    cutoff, and the cutoff excludes that whole thread from retrieval, so
+    neither condition can be handed its own answer.
+
+    What still needs a person is `expected_elements`. These are taken from what
+    the thread says was done, which is not always the same as what mattered.
+    """
+    rows = connection.execute(
+        """
+        SELECT thread_id, subject, situation, actions, outcome, summary
+        FROM cases
+        WHERE outcome_state = 'confirmed'
+          AND situation <> ''
+          AND actions <> ''
+        ORDER BY importance_score DESC, ended_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        thread_id = str(row["thread_id"])
+        # The cutoff is the first moment an outcome was recorded. Retrieval
+        # drops any thread still running then, which removes this one.
+        resolution = connection.execute(
+            """
+            SELECT MIN(occurred_at) AS at FROM claims
+            WHERE thread_id = ? AND claim_type = 'outcome' AND occurred_at IS NOT NULL
+            """,
+            (thread_id,),
+        ).fetchone()
+        asked_at = str(resolution["at"] or "") if resolution else ""
+        if not asked_at:
+            continue
+        expected = [
+            line.strip()
+            for line in str(row["actions"] or "").splitlines()
+            if line.strip()
+        ]
+        if not expected:
+            continue
+        tasks.append(
+            {
+                "id": f"auto-{thread_id[:32]}",
+                "asked_at": asked_at,
+                "source_thread_id": thread_id,
+                "situation": f"{row['subject']}\n\n{row['situation']}".strip(),
+                "expected_elements": expected,
+                "what_actually_happened": str(row["outcome"] or "").strip(),
+                "notes": (
+                    "Generated from a case with a recorded outcome. Check that "
+                    "expected_elements are what actually mattered, and that the "
+                    "situation reads as it did at the time rather than in "
+                    "hindsight."
+                ),
+            }
+        )
+    return tasks
+
+
+def accepted_cards(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Induced rules the owner has accepted, in experience-card form."""
+    from .induction import list_rules
+
+    return [
+        {
+            "id": rule["rule_id"],
+            "title": rule["title"],
+            "situation": rule["situation"],
+            "trigger": rule["trigger"],
+            "actions": rule["actions"],
+            "rationale": rule["rationale"],
+            "exceptions": rule["exceptions"],
+            "failure_conditions": rule["failure_conditions"],
+        }
+        for rule in list_rules(connection, status="accepted", limit=1000)
+    ]
+
+
 def card_coverage(
     connection: sqlite3.Connection,
     cards: Sequence[Mapping[str, Any]],
     *,
     limit: int = 3,
+    reviewed: bool = True,
 ) -> dict[str, Any]:
     """
-    For each hand-written card, show what the pipeline found on its own.
+    For each card, show what the pipeline found on its own.
 
     This deliberately reports candidates rather than passing judgement. Whether
     a retrieved rule is really the same rule is a call only the owner can make,
     and an automatic verdict here would manufacture a score that means nothing.
+
+    `reviewed` records whether a person stood behind these cards. Measuring the
+    pipeline against cards the pipeline itself wrote and nobody confirmed is
+    marking your own exam, so the result says so rather than being reported as
+    a score.
     """
     results = []
     for card in cards:
@@ -379,5 +540,14 @@ def card_coverage(
     return {
         "cards": len(cards),
         "cards_with_no_candidate": sum(1 for item in results if item["found_nothing"]),
+        "baseline_valid": reviewed,
+        "baseline_note": (
+            "These cards were written or accepted by a person, so they are a "
+            "usable baseline."
+            if reviewed
+            else "These cards have not been reviewed. They came from the same "
+            "pipeline being measured, so this is not a baseline; use it to see "
+            "what was induced, not as a score."
+        ),
         "results": results,
     }

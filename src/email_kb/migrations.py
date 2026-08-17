@@ -250,12 +250,43 @@ CREATE VIRTUAL TABLE claims_fts USING fts5(
 """
 
 
+# Repeated cases must collapse into one rule with many instances rather than
+# into many near-identical knowledge cards. A candidate rule therefore records
+# which cases support it and which contradict it, and how many of those cases
+# actually had a recorded outcome, so a pattern nobody ever confirmed cannot
+# pass for a proven rule.
+INDUCTION = """
+CREATE TABLE IF NOT EXISTS rule_candidates (
+    rule_id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    situation TEXT NOT NULL,
+    trigger_text TEXT,
+    actions_json TEXT NOT NULL,
+    rationale TEXT,
+    exceptions_json TEXT NOT NULL,
+    failure_conditions_json TEXT NOT NULL,
+    supporting_threads_json TEXT NOT NULL,
+    contradicting_threads_json TEXT NOT NULL,
+    supporting_cases INTEGER NOT NULL,
+    cases_with_confirmed_outcome INTEGER NOT NULL,
+    model TEXT,
+    prompt_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_candidates_cluster
+    ON rule_candidates(cluster_id);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline", BASELINE),
     (2, "independent_passes", INDEPENDENT_PASSES),
     (3, "retrieval", RETRIEVAL),
     (4, "feedback", FEEDBACK),
     (5, "claim_context", CLAIM_CONTEXT),
+    (6, "induction", INDUCTION),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

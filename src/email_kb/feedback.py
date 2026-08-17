@@ -33,6 +33,28 @@ VERDICT_HELP = {
 }
 
 
+# Checked in order, so an id is resolved by where it exists rather than by a
+# guess at its shape. Rule ids and claim uids both contain a colon.
+TARGET_TABLES = (
+    ("rule", "rule_candidates", "rule_id"),
+    ("claim", "claims", "claim_uid"),
+    ("case", "cases", "thread_id"),
+)
+
+
+def resolve_target(connection: sqlite3.Connection, target_id: str) -> str:
+    for kind, table, column in TARGET_TABLES:
+        found = connection.execute(
+            f"SELECT 1 FROM {table} WHERE {column} = ?", (target_id,)
+        ).fetchone()
+        if found is not None:
+            return kind
+    raise ValueError(
+        f"No rule, claim, or case with id {target_id!r}. Run 'index' or "
+        "'induce' first, or check the id."
+    )
+
+
 def record_feedback(
     connection: sqlite3.Connection,
     *,
@@ -40,20 +62,10 @@ def record_feedback(
     verdict: str,
     note: str | None = None,
 ) -> dict[str, Any]:
-    """Append one verdict. A claim uid contains ':'; a thread id does not."""
+    """Append one verdict for a rule, a claim, or a case."""
     if verdict not in VERDICTS:
         raise ValueError(f"verdict must be one of: {', '.join(VERDICTS)}")
-    target_kind = "claim" if ":" in target_id else "case"
-    table = "claims" if target_kind == "claim" else "cases"
-    column = "claim_uid" if target_kind == "claim" else "thread_id"
-    known = connection.execute(
-        f"SELECT 1 FROM {table} WHERE {column} = ?", (target_id,)
-    ).fetchone()
-    if known is None:
-        raise ValueError(
-            f"No indexed {target_kind} {target_id!r}. Run 'index' first, or "
-            "check the id."
-        )
+    target_kind = resolve_target(connection, target_id)
 
     connection.execute(
         """
@@ -63,17 +75,23 @@ def record_feedback(
         (target_kind, target_id, verdict, note, utc_now()),
     )
     connection.commit()
+    if target_kind == "rule":
+        effect = (
+            "accepted_as_stated_experience"
+            if verdict == "useful"
+            else "not_stated_experience"
+        )
+    elif verdict in RANKING_VERDICTS:
+        effect = "ranking_only"
+    elif verdict == "wrong":
+        effect = "hidden_from_agents"
+    else:
+        effect = "flagged_as_outdated"
     return {
         "target_kind": target_kind,
         "target_id": target_id,
         "verdict": verdict,
-        "effect": (
-            "ranking_only"
-            if verdict in RANKING_VERDICTS
-            else "hidden_from_agents"
-            if verdict == "wrong"
-            else "flagged_as_outdated"
-        ),
+        "effect": effect,
     }
 
 
