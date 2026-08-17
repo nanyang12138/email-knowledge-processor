@@ -213,42 +213,60 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
     indexed = count("cases")
     stale = count("thread_analyses", "WHERE status = 'stale'")
 
+    searchable = count("messages_fts")
+
+    # Two layers, and the first one stands on its own. Searching the mail needs
+    # no model, so reporting the whole system as not ready because nothing has
+    # been analyzed would hide the part that already works.
     checks: list[dict[str, Any]] = [
         {
             "check": "schema_version",
+            "layer": "search",
             "ok": version == SCHEMA_VERSION,
             "detail": f"database is at {version}, code expects {SCHEMA_VERSION}",
             "fix": None if version == SCHEMA_VERSION else "run 'init'",
         },
         {
             "check": "messages_imported",
+            "layer": "search",
             "ok": messages > 0,
             "detail": f"{messages} messages",
             "fix": None if messages else "run 'ingest' against your export",
         },
         {
-            "check": "analyses_available",
-            "ok": agent_visible > 0,
-            "detail": f"{agent_visible} threads an agent may see",
-            "fix": None if agent_visible else "run 'analyze'",
-        },
-        {
-            "check": "index_current",
-            "ok": indexed >= agent_visible and (indexed > 0 or agent_visible == 0),
-            "detail": f"{indexed} cases indexed against {agent_visible} analyses",
-            "fix": None if indexed >= agent_visible else "run 'index'",
+            "check": "messages_searchable",
+            "layer": "search",
+            "ok": searchable >= messages,
+            "detail": f"{searchable} of {messages} messages indexed for search",
+            "fix": None if searchable >= messages else "run 'index'",
         },
         {
             "check": "mcp_extra_installed",
+            "layer": "search",
             "ok": _has_mcp(),
             "detail": "the mcp package is required to serve agents",
             "fix": None if _has_mcp() else 'install with pip install -e ".[agent]"',
+        },
+        {
+            "check": "analyses_available",
+            "layer": "experience",
+            "ok": agent_visible > 0,
+            "detail": f"{agent_visible} threads distilled into cases",
+            "fix": None if agent_visible else "run 'analyze'",
+        },
+        {
+            "check": "cases_indexed",
+            "layer": "experience",
+            "ok": indexed >= agent_visible,
+            "detail": f"{indexed} cases indexed against {agent_visible} analyses",
+            "fix": None if indexed >= agent_visible else "run 'index'",
         },
     ]
     if stale:
         checks.append(
             {
                 "check": "stale_analyses",
+                "layer": "experience",
                 "ok": False,
                 "detail": (
                     f"{stale} analyses came from the anchored review flow, whose "
@@ -262,6 +280,7 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
     checks.append(
         {
             "check": "database_not_committable",
+            "layer": "search",
             "ok": bool(exposure["safe"]),
             "detail": exposure["detail"],
             "fix": None
@@ -277,6 +296,7 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
     checks.append(
         {
             "check": "disk_headroom",
+            "layer": "search",
             "ok": room,
             "detail": (
                 f"{free // 1_000_000} MB free where the database lives, "
@@ -288,8 +308,10 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
             "EMAIL_KB_DB",
         }
     )
+    search_checks = [item for item in checks if item["layer"] == "search"]
     return {
-        "ready_for_agents": all(item["ok"] for item in checks),
+        "can_search_email": all(item["ok"] for item in search_checks),
+        "can_answer_from_experience": all(item["ok"] for item in checks),
         "next_steps": [
             item["fix"] for item in checks if not item["ok"] and item["fix"]
         ],

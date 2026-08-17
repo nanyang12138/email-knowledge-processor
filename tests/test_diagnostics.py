@@ -135,13 +135,38 @@ class DoctorTests(unittest.TestCase):
     def test_an_empty_database_is_not_ready_and_says_what_to_do(self) -> None:
         report = doctor(self.connection, self.database)
 
-        self.assertFalse(report["ready_for_agents"])
+        self.assertFalse(report["can_search_email"])
         self.assertIn("run 'ingest' against your export", report["next_steps"])
         self.assertTrue(self.named(report, "schema_version")["ok"])
         self.assertEqual(
             self.named(report, "schema_version")["detail"],
             f"database is at {SCHEMA_VERSION}, code expects {SCHEMA_VERSION}",
         )
+
+    def test_searching_is_reported_ready_before_anything_is_analyzed(self) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO messages (
+                email_id, conversation_id, to_recipients_json, cc_recipients_json,
+                bcc_recipients_json, reply_to_json, subject, body, clean_body,
+                has_attachments, is_read, categories_json, body_sha256, raw_json
+            )
+            VALUES ('m1', 't1', '[]', '[]', '[]', '[]', 's', 'b', 'b', 0, 1,
+                    '[]', 'x', '{}')
+            """
+        )
+        self.connection.execute(
+            "INSERT INTO messages_fts (email_id, conversation_id, subject, body,"
+            " people) VALUES ('m1', 't1', 's', 'b', '')"
+        )
+        self.connection.commit()
+
+        report = doctor(self.connection, self.database)
+
+        # The searchable layer stands on its own; nothing has been analyzed.
+        self.assertTrue(report["can_search_email"])
+        self.assertFalse(report["can_answer_from_experience"])
+        self.assertIn("run 'analyze'", report["next_steps"])
 
     def test_analyses_without_an_index_are_reported_as_unindexed(self) -> None:
         save_thread_analysis(
@@ -160,7 +185,7 @@ class DoctorTests(unittest.TestCase):
 
         report = doctor(self.connection, self.database)
 
-        self.assertFalse(self.named(report, "index_current")["ok"])
+        self.assertFalse(self.named(report, "cases_indexed")["ok"])
         self.assertIn("run 'index'", report["next_steps"])
 
     def test_analyses_from_the_anchored_flow_are_reported_as_stale(self) -> None:
