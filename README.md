@@ -37,8 +37,10 @@
 ```powershell
 cd C:\Users\nanyang2\email-knowledge-processor
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,agent]"
 ```
+
+`agent` 是接入 Claude Code 和 Cursor 需要的 MCP 依赖。
 
 Cursor SDK API Key 在
 [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations)
@@ -51,17 +53,19 @@ $env:EMAIL_KB_OWNER = "your.mailbox@example.com"
 
 `CURSOR_API_KEY` 只在当前 PowerShell 会话中有效。
 
-安装后也可以使用一键脚本完成导入、分析和质量报告；未设置 API Key 时会
-安全提示输入，不会把密钥写入磁盘：
+安装后也可以用一键脚本完成导入、分析、质量报告、建索引和体检；未设置 API Key
+时会安全提示输入，不会把密钥写入磁盘：
 
 ```powershell
 .\scripts\run-analysis.ps1 `
   -InputPath "$env:OneDrive\EmailKnowledgeBase" `
   -OwnerEmail $env:EMAIL_KB_OWNER `
-  -Limit 5
+  -Database "C:\Users\nanyang2\email-kb-data\knowledge.db" `
+  -Limit 20
 ```
 
-加 `-DryRun` 可以只估算批次数，不调用 Cursor。
+加 `-DryRun` 只估算调用次数，不调用 Cursor。`-Database` 建议指向仓库外面：
+数据库是邮箱的派生物，放在仓库外就没有被提交的可能。
 
 ## 1. 导入
 

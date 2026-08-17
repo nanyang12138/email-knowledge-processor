@@ -6,10 +6,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OwnerEmail,
 
-    [int]$Limit = 5,
+    [int]$Limit = 20,
     [string]$Model = "auto",
     [string]$SecondModel = "",
     [string]$ReconcilerModel = "",
+
+    # The database is a derivative of the mailbox. Keeping it outside the
+    # repository removes any chance of committing it.
+    [string]$Database = "",
+
     [switch]$DryRun,
     [switch]$Force
 )
@@ -17,7 +22,9 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$Database = Join-Path $ProjectRoot "data\knowledge.db"
+if (-not $Database) {
+    $Database = Join-Path $ProjectRoot "data\knowledge.db"
+}
 $TemporaryApiKey = $false
 
 if (-not (Test-Path $Python)) {
@@ -76,6 +83,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Quality report failed."
     }
+
+    if (-not $DryRun) {
+        & $Python -m email_kb --db $Database index
+        if ($LASTEXITCODE -ne 0) {
+            throw "Building the retrieval index failed."
+        }
+    }
+
+    # Last, so the closing output says what still needs doing.
+    & $Python -m email_kb --db $Database doctor
 }
 finally {
     if ($TemporaryApiKey) {
