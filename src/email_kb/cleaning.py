@@ -133,12 +133,29 @@ def remove_exact_prior_content(
     return result, removed
 
 
+MIN_EVIDENCE_CHARS = 8
+
+
 def normalized_evidence(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def evidence_in_text(quote: str, source: str) -> bool:
+def evidence_span(quote: str, source: str) -> tuple[int, int] | None:
+    """
+    Locate a quote inside the normalized form of a source body.
+
+    Offsets are into the normalized text, not the raw message. Callers must
+    store the hash of the text they resolved against so the offsets can be
+    invalidated when cleaning changes.
+    """
     normalized_quote = normalized_evidence(quote)
-    if len(normalized_quote) < 8:
-        return False
-    return normalized_quote in normalized_evidence(source)
+    if len(normalized_quote) < MIN_EVIDENCE_CHARS:
+        return None
+    start = normalized_evidence(source).find(normalized_quote)
+    if start < 0:
+        return None
+    return start, start + len(normalized_quote)
+
+
+def evidence_in_text(quote: str, source: str) -> bool:
+    return evidence_span(quote, source) is not None

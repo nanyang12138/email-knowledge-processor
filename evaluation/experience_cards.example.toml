@@ -1,0 +1,95 @@
+# Example experience cards.
+#
+# Copy this to evaluation/experience_cards.toml and replace it with rules you
+# actually hold. That file is gitignored because real rules describe real work.
+#
+# These are the target shape for extraction. Once they exist, the question stops
+# being "did the model write a good summary" and becomes "can the pipeline
+# rebuild these from the raw email", which has an answer.
+#
+# Write them from memory, not by reading the knowledge base. A card you had to
+# look up is not a rule you hold.
+#
+# Ten to twenty is enough to start. The cards that are hard to write are usually
+# the valuable ones, because they are the tacit rules that were never emailed to
+# anyone.
+
+[[card]]
+id = "pin-toolchain-before-bisecting"
+title = "Pin the toolchain before bisecting a build failure"
+
+# The conditions under which this rule applies. Retrieval matches against this,
+# so describe the situation, not the fix.
+situation = """
+A build that was passing starts failing, and a change landed around the same
+time. The failure looks like it belongs to the change, but the build machines
+also update their toolchain on their own schedule.
+"""
+
+# What makes you reach for this rule rather than another one.
+trigger = "A build breaks close in time to a change, on a machine you do not control."
+
+# The steps, in order.
+actions = [
+  "Pin the toolchain to the version that last passed.",
+  "Rerun the failing build with only the pin changed.",
+  "Bisect the change only if the failure survives the pin.",
+]
+
+# Why it works. This is the part that is almost never written down in email.
+rationale = """
+Toolchain drift and code changes produce identical symptoms, and bisecting a
+change that was never at fault costs far more than one pinned rerun.
+"""
+
+# When it does not apply.
+exceptions = [
+  "The build runs in a container with a fixed image, so the toolchain cannot drift.",
+  "The failure is a test assertion rather than a compile or link error.",
+]
+
+# How you would know this rule is failing you.
+failure_conditions = [
+  "The pinned rerun fails identically, meaning the toolchain was never involved.",
+]
+
+# Times it was wrong. A rule with no counterexample is usually underspecified.
+counterexamples = [
+  "During the 2024 cache migration the pin masked a real incompatibility for a week.",
+]
+
+
+[[card]]
+id = "confirm-audit-notice-before-acting"
+title = "Confirm an automated audit notice names a real defect before acting on it"
+
+situation = """
+An automated audit mails a list of items attributed to you. The list is
+generated from a rule, and the rule has false positives.
+"""
+
+trigger = "An automated notice assigns you work you did not ask for."
+
+actions = [
+  "Open one flagged item and check it by hand against the stated rule.",
+  "Reply on the thread with the finding, whether or not it was a real defect.",
+  "Fix the whole batch only once one item is confirmed genuine.",
+]
+
+rationale = """
+These notices repeat, and treating each batch as real work spends hours on
+rule bugs. Replying on the thread is what makes the outcome recoverable later;
+without it there is no record of whether the batch mattered.
+"""
+
+exceptions = [
+  "The notice comes from a rule you have already confirmed genuine this quarter.",
+]
+
+failure_conditions = [
+  "The sampled item is genuine, so the batch needs handling rather than dismissal.",
+]
+
+counterexamples = [
+  "A licence-header audit was correct every time and sampling only added delay.",
+]

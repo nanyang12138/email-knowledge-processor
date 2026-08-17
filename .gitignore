@@ -17,3 +17,9 @@ RawJSON/
 CSV/
 EmailKB_*.csv
 EmailKB_*.json
+
+# Experience cards and replay tasks describe real work, so only the
+# committed examples are public. Everything else stays local.
+evaluation/*.toml
+!evaluation/*.example.toml
+evaluation/reports/

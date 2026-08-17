@@ -1,0 +1,58 @@
+# Example decision replay tasks.
+#
+# Copy this to evaluation/decision_replay.toml and replace it with real
+# problems. That file is gitignored because the situations are real work.
+#
+# This is the only measurement in the project that corresponds to the point of
+# building it. Everything else checks whether the system is honest; this checks
+# whether it is useful.
+#
+# How to write one:
+#
+# 1. Pick a problem from your own history whose ending you know.
+# 2. Write `situation` as it looked *at the time*, before the answer was known.
+#    Leaving in hindsight is the easiest way to make the whole test meaningless.
+# 3. Set `asked_at` to the moment before the resolution. Knowledge that
+#    concluded at or after this instant is withheld from the agent, so the
+#    answer cannot leak back in through a thread that ended later.
+# 4. List in `expected_elements` the things that actually mattered. Scoring
+#    checks for these, so write them as the substance, not as a full sentence.
+#
+# Thirty to fifty tasks give a usable signal. Fewer is still worth running: even
+# five will tell you whether retrieval returns anything relevant at all.
+
+[[task]]
+id = "nightly-build-toolchain-2024-03"
+asked_at = "2024-03-05T00:00:00Z"
+
+situation = """
+The nightly build for the desktop client started failing overnight on Windows
+only. The Linux and macOS builds are green. A change to the packaging scripts
+landed yesterday afternoon. The link step fails with an unresolved symbol in a
+third-party library that nobody has touched in months. The build machines are
+managed by another team.
+"""
+
+# What actually mattered. Written as substance, not prose.
+expected_elements = [
+  "check whether the build toolchain version changed",
+  "pin the toolchain to the last passing version and rerun",
+  "compare the Windows machine image against the Linux one",
+  "do not bisect the packaging change first",
+]
+
+# The real ending. Not shown to the agent; it is here so a person can read the
+# transcripts and judge whether the coverage score was fair.
+what_actually_happened = """
+The packaging change was unrelated. The Windows build agents had picked up a
+new compiler point release overnight, which changed the name mangling for the
+third-party library. Pinning the toolchain restored the build within an hour.
+"""
+
+what_worked = "Pinning the toolchain before touching the packaging change."
+
+notes = """
+This is a good replay task because the obvious answer at the time, the recent
+packaging change, was wrong, so an agent that only restates the situation will
+score badly.
+"""
