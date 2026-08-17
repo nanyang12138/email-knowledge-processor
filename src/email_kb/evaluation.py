@@ -337,7 +337,7 @@ def run_replay(
     *,
     model: str,
     workspace: str | Path,
-    api_key: str,
+    provider: Any = None,
     limit: int = 5,
 ) -> dict[str, Any]:
     """
@@ -348,9 +348,9 @@ def run_replay(
     scores: a coverage number is a summary, and disagreements with it have to
     be checkable by reading what was actually said.
     """
-    from .analysis import _agent_prompt
+    from .providers import build_provider
 
-    workspace_path = Path(workspace).expanduser().resolve()
+    backend = provider or build_provider(workspace=workspace)
     scores: list[dict[str, Any]] = []
     transcripts: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -360,14 +360,12 @@ def run_replay(
         answers: dict[str, str] = {}
         try:
             for condition in ("without_knowledge", "with_knowledge"):
-                result = _agent_prompt(
+                result = backend.complete(
                     prompts[condition],
                     model=model,
-                    api_key=api_key,
-                    cwd=workspace_path,
                     idempotency_key=f"replay:{task['id']}:{condition}:{model}",
                 )
-                answers[condition] = str(result.result)
+                answers[condition] = result.text
         # One failing task must not discard the rest of the comparison.
         except Exception as error:  # noqa: BLE001
             failures.append({"task_id": task["id"], "error": str(error)})
@@ -390,6 +388,7 @@ def run_replay(
 
     return {
         "model": model,
+        "provider": backend.name,
         "summary": summarize_replay(scores),
         "scores": scores,
         "transcripts": transcripts,

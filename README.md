@@ -42,16 +42,45 @@ py -3.11 -m venv .venv
 
 `agent` 是接入 Claude Code 和 Cursor 需要的 MCP 依赖。
 
-Cursor SDK API Key 在
+## 选择模型后端
+
+**哪个模型看到邮件，是数据决策，不只是质量决策。** 所以后端在命令行上选，
+不写死在代码里。
+
+### Cursor（默认）
+
+需要 API Key，在
 [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations)
-创建。不要把密钥写入项目文件：
+创建。**装了 Cursor 桌面版也仍然需要**——SDK 的认证和编辑器是分开的，
+`LocalAgentOptions` 指的是"在本地工作目录里跑 agent"，不是"不用认证"。
 
 ```powershell
 $env:CURSOR_API_KEY = "cursor_..."
 $env:EMAIL_KB_OWNER = "your.mailbox@example.com"
 ```
 
-`CURSOR_API_KEY` 只在当前 PowerShell 会话中有效。
+`CURSOR_API_KEY` 只在当前 PowerShell 会话中有效，不要写进项目文件。
+
+### 任何 OpenAI 兼容端点
+
+覆盖 Azure OpenAI、OpenAI、vLLM、llama.cpp 和 Ollama。**指向本地运行时，
+邮件正文就不出这台机器**——这是唯一能让公司邮件完全不外发的做法。
+
+```powershell
+# 本地 Ollama，不需要任何 key
+.\.venv\Scripts\python.exe -m email_kb `
+  --provider openai-compatible --base-url "http://localhost:11434/v1" `
+  --db $KB analyze --model "qwen2.5:32b" --second-model "llama3.3:70b" --limit 20
+
+# Azure OpenAI
+$env:EMAIL_KB_PROVIDER = "openai-compatible"
+$env:EMAIL_KB_BASE_URL = "https://<resource>.openai.azure.com/openai/v1"
+$env:EMAIL_KB_API_KEY  = "..."
+```
+
+`--provider` 和 `--base-url` 对 `analyze`、`induce`、`replay` 都有效。
+温度固定为 0，因为"改了 prompt 之后能重跑对比"比采样多样性更重要；两次盲跑的
+不稳定性应该来自**用两个不同模型**，而不是同一个模型掷不同的骰子。
 
 安装后也可以用一键脚本完成导入、分析、质量报告、建索引和体检；未设置 API Key
 时会安全提示输入，不会把密钥写入磁盘：

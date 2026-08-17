@@ -4,8 +4,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 from email_kb.analysis import (
     _parse_agent_json,
@@ -18,6 +16,28 @@ from email_kb.analysis import (
 )
 from email_kb.database import connect, initialize, quality_report
 from email_kb.ingest import ingest_sources
+from email_kb.providers import Completion
+
+
+class RecordingProvider:
+    """A backend that returns canned responses and remembers what it was sent."""
+
+    name = "test"
+
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, *, model: str, idempotency_key: str):
+        self.prompts.append(prompt)
+        return Completion(
+            text=json.dumps(self.responses.pop(0)),
+            model=model,
+            run_id=f"run-{len(self.prompts)}",
+            agent_id="agent-test",
+            duration_ms=1,
+        )
+
 
 SOURCE_LOOKUP = {
     "m1": "Use option B.",
@@ -364,46 +384,29 @@ class PipelineTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def run_pipeline(self, responses: list[dict], **kwargs):
-        prompts: list[str] = []
-        remaining = list(responses)
-
-        def fake_prompt(*args, **_):
-            prompts.append(args[0])
-            self.assertEqual(args[1].tools, [])
-            output = remaining.pop(0)
-            return SimpleNamespace(
-                status="finished",
-                id=f"run-{len(remaining)}",
-                agent_id="agent-test",
-                result=json.dumps(output),
-                model="test-model",
-                duration_ms=1,
-            )
-
-        with (
-            patch.dict("os.environ", {"CURSOR_API_KEY": "test-key"}),
-            patch("email_kb.analysis.Agent.prompt", side_effect=fake_prompt),
-        ):
-            summary = analyze_database(
-                self.connection,
-                owner_email="owner@example.test",
-                workspace=self.root,
-                model="test-model",
-                **kwargs,
-            )
-        return summary, prompts
+        provider = RecordingProvider(responses)
+        summary = analyze_database(
+            self.connection,
+            owner_email="owner@example.test",
+            workspace=self.root,
+            model="test-model",
+            provider=provider,
+            **kwargs,
+        )
+        return summary, provider.prompts
 
     def test_parses_fenced_agent_json(self) -> None:
         self.assertEqual(_parse_agent_json('```json\n{"a": 1}\n```'), {"a": 1})
 
-    def test_dry_run_needs_no_api_key_and_changes_no_state(self) -> None:
-        with patch.dict("os.environ", {}, clear=True):
-            summary = analyze_database(
-                self.connection,
-                owner_email="owner@example.test",
-                workspace=self.root,
-                dry_run=True,
-            )
+    def test_dry_run_needs_no_backend_and_changes_no_state(self) -> None:
+        # No provider is passed, so a dry run that touched a model at all would
+        # fail rather than quietly spend calls.
+        summary = analyze_database(
+            self.connection,
+            owner_email="owner@example.test",
+            workspace=self.root,
+            dry_run=True,
+        )
 
         self.assertTrue(summary["dry_run"])
         self.assertEqual(summary["segments_total"], 1)

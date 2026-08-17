@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .database import utc_now
+from .providers import Provider, build_provider
 from .retrieval import search_tokens
 
 PROMPT_VERSION = "rule-induction-v1"
@@ -500,7 +501,7 @@ def induce_rules(
     connection: sqlite3.Connection,
     *,
     workspace: str | Path,
-    api_key: str,
+    provider: Provider | None = None,
     model: str = "auto",
     limit: int | None = None,
     neighbours: int = DEFAULT_NEIGHBOURS,
@@ -508,7 +509,7 @@ def induce_rules(
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    from .analysis import _agent_prompt, _parse_agent_json
+    from .analysis import _parse_agent_json
 
     clusters = cluster_cases(
         connection,
@@ -531,9 +532,10 @@ def induce_rules(
             "preview": [cluster_payload(connection, cluster) for cluster in clusters],
         }
 
-    workspace_path = Path(workspace).expanduser().resolve()
+    backend = provider or build_provider(workspace=workspace)
     summary: dict[str, Any] = {
         "prompt_version": PROMPT_VERSION,
+        "provider": backend.name,
         "clusters": len(clusters),
         "rules_proposed": 0,
         "cases_not_matching_any_rule": 0,
@@ -543,15 +545,13 @@ def induce_rules(
         payload = cluster_payload(connection, cluster)
         try:
             result = _parse_agent_json(
-                _agent_prompt(
+                backend.complete(
                     _induction_prompt(payload),
                     model=model,
-                    api_key=api_key,
-                    cwd=workspace_path,
                     idempotency_key=(
                         f"{PROMPT_VERSION}:{cluster['cluster_id']}:{model}"
                     ),
-                ).result
+                ).text
             )
         # One failing cluster must not discard the rest of the induction pass.
         except Exception as error:  # noqa: BLE001

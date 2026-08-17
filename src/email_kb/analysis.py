@@ -12,15 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
-import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-
-from cursor_sdk import Agent, AgentOptions, CursorAgentError, LocalAgentOptions
 
 from .cleaning import evidence_span, remove_exact_prior_content
 from .database import (
@@ -30,6 +26,7 @@ from .database import (
     record_run,
     save_thread_analysis,
 )
+from .providers import Provider, build_provider
 
 PROMPT_VERSION = "email-extraction-v2"
 PASS_LABELS = ("a", "b")
@@ -451,67 +448,6 @@ checks and never decides whether the result is accepted, so report it honestly.
 """.strip()
 
 
-def _run_status(value: Any) -> str:
-    return str(getattr(value, "value", value)).casefold()
-
-
-def _model_name(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, Mapping):
-        return str(value.get("id") or value)
-    return str(getattr(value, "id", value))
-
-
-def _agent_prompt(
-    prompt: str,
-    *,
-    model: str,
-    api_key: str,
-    cwd: Path,
-    idempotency_key: str,
-    retries: int = 3,
-) -> Any:
-    last_error: Exception | None = None
-    for attempt in range(retries):
-        try:
-            result = Agent.prompt(
-                prompt,
-                AgentOptions(
-                    api_key=api_key,
-                    model=model,
-                    idempotency_key=idempotency_key,
-                    local=LocalAgentOptions(cwd=cwd),
-                    tools=[],
-                ),
-            )
-            if _run_status(result.status) not in {"finished", "completed", "success"}:
-                raise RuntimeError(
-                    f"Cursor run {result.id} ended with status {result.status}: "
-                    f"{result.result}"
-                )
-            return result
-        except CursorAgentError as error:
-            last_error = error
-            if not getattr(error, "is_retryable", False) or attempt + 1 >= retries:
-                raise
-            retry_after = getattr(error, "retry_after", None)
-            delay = (
-                float(retry_after)
-                if isinstance(retry_after, (int, float))
-                else 2**attempt
-            )
-            time.sleep(min(delay, 30))
-        except RuntimeError as error:
-            last_error = error
-            if attempt + 1 >= retries:
-                raise
-            time.sleep(2**attempt)
-    raise RuntimeError("Cursor run failed") from last_error
-
-
 def validate_claims(
     claims: Any, source_lookup: Mapping[str, str], *, prefix: str = ""
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -881,6 +817,7 @@ def analyze_database(
     model: str = "auto",
     second_model: str | None = None,
     reconciler_model: str | None = None,
+    provider: Provider | None = None,
     limit: int | None = None,
     max_chars_per_request: int = 80_000,
     min_agreement: float = 0.5,
@@ -937,15 +874,11 @@ def analyze_database(
             "source_characters": sum(_size(document) for document, _, _ in planned),
         }
 
-    api_key = os.environ.get("CURSOR_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "CURSOR_API_KEY is not set. Create a key in Cursor Dashboard > "
-            "Integrations and set it in this PowerShell session."
-        )
+    backend = provider or build_provider(workspace=workspace_path)
 
     summary: dict[str, Any] = {
         "prompt_version": PROMPT_VERSION,
+        "provider": backend.name,
         "threads_considered": len(planned),
         "verified": 0,
         "verified_with_gaps": 0,
@@ -983,8 +916,7 @@ def analyze_database(
                     segments,
                     label=label,
                     model=pass_model,
-                    api_key=api_key,
-                    workspace=workspace_path,
+                    provider=backend,
                     invocation_id=invocation_id,
                     batch_id=batch_id,
                 )
@@ -994,17 +926,15 @@ def analyze_database(
             payload = _reconcile_payload(
                 document, proposals, max_chars=max_chars_per_request
             )
-            reconcile_result = _agent_prompt(
+            reconcile_result = backend.complete(
                 _reconcile_prompt(payload),
                 model=reconcile_model,
-                api_key=api_key,
-                cwd=workspace_path,
                 idempotency_key=(
                     f"{PROMPT_VERSION}:{invocation_id}:{batch_id}:"
                     f"reconcile:{reconcile_model}"
                 ),
             )
-            reconciled_raw = _parse_agent_json(reconcile_result.result)
+            reconciled_raw = _parse_agent_json(reconcile_result.text)
             final = _validate_analysis(reconciled_raw, document)
             record_run(
                 connection,
@@ -1013,15 +943,14 @@ def analyze_database(
                 status="finished",
                 thread_ids=[thread_id],
                 input_sha256=_sha256_json(payload),
-                agent_id=getattr(reconcile_result, "agent_id", None),
-                run_id=getattr(reconcile_result, "id", None),
-                model=_model_name(getattr(reconcile_result, "model", None))
-                or reconcile_model,
+                agent_id=reconcile_result.agent_id,
+                run_id=reconcile_result.run_id,
+                model=reconcile_result.model or reconcile_model,
                 pass_label="final",
                 evidence_claims_checked=final["claims_checked"],
                 evidence_claims_valid=final["claims_valid"],
                 output=reconciled_raw,
-                duration_ms=getattr(reconcile_result, "duration_ms", None),
+                duration_ms=reconcile_result.duration_ms,
             )
         # A thread boundary must persist every SDK, parsing, or validation failure.
         except Exception as error:  # noqa: BLE001
@@ -1086,8 +1015,7 @@ def _run_pass(
     *,
     label: str,
     model: str,
-    api_key: str,
-    workspace: Path,
+    provider: Provider,
     invocation_id: str,
     batch_id: str,
 ) -> dict[str, Any]:
@@ -1096,17 +1024,15 @@ def _run_pass(
     for segment in segments:
         payload = {"prompt_version": PROMPT_VERSION, **segment}
         input_sha = _sha256_json(payload)
-        result = _agent_prompt(
+        result = provider.complete(
             _extract_prompt(payload),
             model=model,
-            api_key=api_key,
-            cwd=workspace,
             idempotency_key=(
                 f"{PROMPT_VERSION}:{invocation_id}:{batch_id}:"
                 f"extract-{label}-{segment['segment_index']}:{model}"
             ),
         )
-        parsed = _parse_agent_json(result.result)
+        parsed = _parse_agent_json(result.text)
         validated = _validate_analysis(parsed, document)
         record_run(
             connection,
@@ -1115,14 +1041,14 @@ def _run_pass(
             status="finished",
             thread_ids=[str(document["thread_id"])],
             input_sha256=input_sha,
-            agent_id=getattr(result, "agent_id", None),
-            run_id=getattr(result, "id", None),
-            model=_model_name(getattr(result, "model", None)) or model,
+            agent_id=result.agent_id,
+            run_id=result.run_id,
+            model=result.model or model,
             pass_label=f"{label}/{segment['segment_index']}",
             evidence_claims_checked=validated["claims_checked"],
             evidence_claims_valid=validated["claims_valid"],
             output=parsed,
-            duration_ms=getattr(result, "duration_ms", None),
+            duration_ms=result.duration_ms,
         )
         segment_results.append(validated)
     return _merge_segment_results(segment_results)

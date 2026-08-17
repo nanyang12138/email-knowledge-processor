@@ -30,6 +30,7 @@ from .induction import (
     rule_stats,
 )
 from .ingest import ingest_sources
+from .providers import build_provider
 from .retrieval import (
     AGENT_VISIBLE_STATUSES,
     check_prior_attempts,
@@ -58,6 +59,20 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_DATABASE,
         help=f"SQLite database path (default: {DEFAULT_DATABASE})",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("cursor", "openai-compatible"),
+        default=os.environ.get("EMAIL_KB_PROVIDER", "cursor"),
+        help="Which backend sees the mail. 'openai-compatible' points at any "
+        "OpenAI chat-completions endpoint, including a local runtime "
+        "(or set EMAIL_KB_PROVIDER)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("EMAIL_KB_BASE_URL"),
+        help="Endpoint for --provider openai-compatible, for example "
+        "http://localhost:11434/v1 (or set EMAIL_KB_BASE_URL)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -289,14 +304,17 @@ REPLAY_HEADER = """
 """
 
 
+def _provider(args: Any) -> Any:
+    return build_provider(
+        provider=args.provider, workspace=Path.cwd(), base_url=args.base_url
+    )
+
+
 def _induce(connection: Any, args: Any) -> Any:
-    api_key = os.environ.get("CURSOR_API_KEY")
-    if not api_key and not args.dry_run:
-        raise RuntimeError("CURSOR_API_KEY is not set")
     return induce_rules(
         connection,
         workspace=Path.cwd(),
-        api_key=api_key or "",
+        provider=None if args.dry_run else _provider(args),
         model=args.model,
         limit=args.limit,
         max_cluster=args.max_cluster,
@@ -331,15 +349,12 @@ def _replay(connection: Any, args: Any) -> Any:
     tasks = load_replay_tasks(args.path)
     if args.prompts_only:
         return [replay_prompts(connection, task, limit=args.limit) for task in tasks]
-    api_key = os.environ.get("CURSOR_API_KEY")
-    if not api_key:
-        raise RuntimeError("CURSOR_API_KEY is not set")
     report = run_replay(
         connection,
         tasks,
         model=args.model,
         workspace=Path.cwd(),
-        api_key=api_key,
+        provider=_provider(args),
         limit=args.limit,
     )
     if args.out:
@@ -474,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
                         model=args.model,
                         second_model=args.second_model,
                         reconciler_model=args.reconciler_model,
+                        provider=None if args.dry_run else _provider(args),
                         limit=args.limit,
                         max_chars_per_request=args.max_chars_per_request,
                         min_agreement=args.min_agreement,
