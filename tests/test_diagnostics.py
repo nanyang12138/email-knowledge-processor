@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from email_kb.database import connect, initialize, save_thread_analysis
 from email_kb.diagnostics import doctor, exposure_check, mcp_config
@@ -186,6 +188,28 @@ class DoctorTests(unittest.TestCase):
 
         self.assertIn("exposure", report)
         self.assertTrue(self.named(report, "database_not_committable")["ok"])
+
+    def test_storage_shows_where_the_space_went(self) -> None:
+        report = doctor(self.connection, self.database)
+        storage = report["storage"]
+
+        self.assertGreater(storage["database_bytes"], 0)
+        self.assertGreater(storage["volume_free_bytes"], 0)
+        self.assertEqual(
+            set(storage["largest_contents"]),
+            {"original_records", "message_bodies", "model_outputs"},
+        )
+
+    def test_a_full_volume_is_reported_as_not_ready(self) -> None:
+        full = SimpleNamespace(total=100, used=100, free=0)
+
+        with patch("shutil.disk_usage", return_value=full):
+            report = doctor(self.connection, self.database)
+
+        self.assertFalse(self.named(report, "disk_headroom")["ok"])
+        self.assertTrue(
+            any("volume with more room" in step for step in report["next_steps"])
+        )
 
 
 @unittest.skipUnless(HAS_MCP, "mcp extra is not installed")

@@ -146,6 +146,52 @@ def exposure_check(database: str | Path) -> dict[str, Any]:
     }
 
 
+def storage_report(
+    connection: sqlite3.Connection, database: str | Path
+) -> dict[str, Any]:
+    """
+    Where the space went, and how much is left on that volume.
+
+    Every message is stored three times over: the original record, the body,
+    and the cleaned body. That is deliberate, because derived text has to be
+    rebuildable from an untouched original, but it means the database lands at
+    roughly three times the size of the export and that is worth seeing rather
+    than discovering when a disk fills up.
+    """
+    path = Path(database).expanduser().resolve()
+    on_disk = sum(
+        candidate.stat().st_size
+        for candidate in (
+            path,
+            path.with_name(path.name + "-wal"),
+            path.with_name(path.name + "-shm"),
+        )
+        if candidate.exists()
+    )
+    usage = shutil.disk_usage(path.parent if path.parent.exists() else Path.cwd())
+
+    def total(query: str) -> int:
+        try:
+            return int(connection.execute(query).fetchone()[0] or 0)
+        except sqlite3.Error:
+            return 0
+
+    return {
+        "database_bytes": on_disk,
+        "volume_free_bytes": usage.free,
+        "volume_total_bytes": usage.total,
+        "largest_contents": {
+            "original_records": total("SELECT SUM(LENGTH(raw_json)) FROM messages"),
+            "message_bodies": total(
+                "SELECT SUM(LENGTH(body) + LENGTH(clean_body)) FROM messages"
+            ),
+            "model_outputs": total(
+                "SELECT SUM(LENGTH(COALESCE(output_json, ''))) FROM analysis_runs"
+            ),
+        },
+    }
+
+
 def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, Any]:
     """One report answering whether this is ready for an agent to use."""
 
@@ -223,6 +269,25 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
             else "move the database outside the repository or ignore it",
         }
     )
+    storage = storage_report(connection, database)
+    free = storage["volume_free_bytes"]
+    # Importing and analysing both grow the database, so less headroom than it
+    # already occupies means the next run may not finish.
+    room = free > max(storage["database_bytes"], 1_000_000_000)
+    checks.append(
+        {
+            "check": "disk_headroom",
+            "ok": room,
+            "detail": (
+                f"{free // 1_000_000} MB free where the database lives, "
+                f"database is {storage['database_bytes'] // 1_000_000} MB"
+            ),
+            "fix": None
+            if room
+            else "put the database on a volume with more room, with --db or "
+            "EMAIL_KB_DB",
+        }
+    )
     return {
         "ready_for_agents": all(item["ok"] for item in checks),
         "next_steps": [
@@ -230,6 +295,7 @@ def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, An
         ],
         "checks": checks,
         "exposure": exposure,
+        "storage": storage,
     }
 
 

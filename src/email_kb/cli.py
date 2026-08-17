@@ -45,7 +45,10 @@ from .retrieval import (
     search_messages,
 )
 
-DEFAULT_DATABASE = Path("data") / "knowledge.db"
+# The database lands at roughly three times the size of the export, so it
+# often needs to live somewhere other than the default. Setting this once beats
+# passing --db to every command.
+DEFAULT_DATABASE = Path(os.environ.get("EMAIL_KB_DB") or Path("data") / "knowledge.db")
 
 
 def _print_json(value: Any) -> None:
@@ -61,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         "--db",
         type=Path,
         default=DEFAULT_DATABASE,
-        help=f"SQLite database path (default: {DEFAULT_DATABASE})",
+        help=f"SQLite database path, or set EMAIL_KB_DB (default: {DEFAULT_DATABASE})",
     )
     parser.add_argument(
         "--provider",
