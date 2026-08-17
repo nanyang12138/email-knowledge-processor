@@ -29,8 +29,12 @@ die() { printf '\nSTOPPED: %s\n' "$1" >&2; exit 1; }
 say "Checking the export at $SOURCE"
 if compgen -G "$SOURCE"/*.zip > /dev/null && ! compgen -G "$SOURCE"/*.csv > /dev/null \
     && ! compgen -G "$SOURCE"/*.json > /dev/null; then
-    die "Only .zip files are here. Unpack them first:
-    cd '$SOURCE' && unzip '*.zip'"
+    command -v unzip > /dev/null 2>&1 || die "Only .zip files are here and unzip
+is not installed. Unpack them some other way, then run this again."
+    echo "only archives here, unpacking them"
+    for archive in "$SOURCE"/*.zip; do
+        unzip -q -o "$archive" -d "$SOURCE" || die "Could not unpack $archive"
+    done
 fi
 
 say "Looking for Python 3.11 or newer"
