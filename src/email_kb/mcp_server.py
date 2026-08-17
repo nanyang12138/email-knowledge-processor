@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .database import connect, initialize, quality_report
+from .feedback import record_feedback
 from .retrieval import AGENT_VISIBLE_STATUSES, index_stats
 from .retrieval import check_prior_attempts as _check_prior_attempts
 from .retrieval import find_similar_cases as _find_similar_cases
@@ -62,7 +63,7 @@ def _query(database: Path, function: Any, *args: Any, **kwargs: Any) -> Any:
         connection.close()
 
 
-def build_server(database: str | Path) -> Any:
+def build_server(database: str | Path, *, allow_feedback: bool = False) -> Any:
     from mcp.server.mcpserver import MCPServer
 
     path = Path(database).expanduser().resolve()
@@ -150,6 +151,32 @@ def build_server(database: str | Path) -> Any:
         finally:
             connection.close()
 
+    if allow_feedback:
+
+        @server.tool()
+        def record_usefulness(
+            target_id: str, was_useful: bool, note: str | None = None
+        ) -> dict[str, Any]:
+            """
+            Record whether a retrieved case or claim actually helped.
+
+            Call this after using a result, with the claim_uid or thread_id you
+            relied on. This only moves things up or down in future rankings. It
+            cannot change what a claim says, and it cannot mark anything wrong
+            or outdated: those are the owner's judgements to make, not an
+            agent's inference from one task going well or badly.
+            """
+            connection = _open(path)
+            try:
+                return record_feedback(
+                    connection,
+                    target_id=target_id,
+                    verdict="useful" if was_useful else "not_useful",
+                    note=note,
+                )
+            finally:
+                connection.close()
+
     return server
 
 
@@ -161,8 +188,14 @@ def main(argv: list[str] | None = None) -> int:
         description="Serve the personal knowledge base over MCP",
     )
     parser.add_argument("--db", type=Path, default=Path("data") / "knowledge.db")
+    parser.add_argument(
+        "--allow-feedback",
+        action="store_true",
+        help="Let the agent record whether a result helped. Off by default: "
+        "reading knowledge and writing to it are separate permissions.",
+    )
     args = parser.parse_args(argv)
-    build_server(args.db).run()
+    build_server(args.db, allow_feedback=args.allow_feedback).run()
     return 0
 
 

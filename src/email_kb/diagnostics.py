@@ -1,0 +1,239 @@
+"""
+Setup checks and client configuration.
+
+Two things go wrong when wiring this into an agent, and neither announces
+itself. The first is tedious: a path typed slightly wrong in an MCP config
+produces a server that silently fails to start. The second is serious: the
+knowledge database is a derivative of the mailbox it was built from, so a
+database sitting inside a git working tree that does not ignore it is one
+`git add -A` away from publishing the mailbox.
+"""
+
+from __future__ import annotations
+
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from .migrations import SCHEMA_VERSION, current_version
+
+SERVER_NAME = "email-knowledge"
+
+CLIENT_LOCATIONS = {
+    "claude": {
+        "project": ".mcp.json",
+        "user": "~/.claude.json",
+        "note": (
+            "Project scope is committed to the repository, so use it only for "
+            "the config itself. The database path it points at must stay "
+            "outside the repository."
+        ),
+    },
+    "cursor": {
+        "project": ".cursor/mcp.json",
+        "user": "~/.cursor/mcp.json",
+        "note": (
+            "A project file overrides the global one entirely for a server of "
+            "the same name; they are not merged."
+        ),
+    },
+}
+
+
+def mcp_config(
+    database: str | Path,
+    *,
+    client: str,
+    allow_feedback: bool = False,
+    server_name: str = SERVER_NAME,
+    python: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build a ready-to-paste MCP entry with every path already resolved.
+
+    Relative paths are the usual reason a stdio server fails to start: the
+    client launches it from a working directory you did not choose.
+    """
+    if client not in CLIENT_LOCATIONS:
+        raise ValueError(f"client must be one of: {', '.join(CLIENT_LOCATIONS)}")
+    interpreter = python or sys.executable
+    args = ["-m", "email_kb.mcp_server", "--db", str(Path(database).resolve())]
+    if allow_feedback:
+        args.append("--allow-feedback")
+    return {
+        "client": client,
+        "install_to": CLIENT_LOCATIONS[client],
+        "config": {
+            "mcpServers": {
+                server_name: {
+                    "type": "stdio",
+                    "command": interpreter,
+                    "args": args,
+                }
+            }
+        },
+    }
+
+
+def _git_root(path: Path) -> Path | None:
+    for candidate in [path, *path.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _git(root: Path, *arguments: str) -> tuple[int, str]:
+    if shutil.which("git") is None:
+        return 127, ""
+    finished = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return finished.returncode, finished.stdout.strip()
+
+
+def exposure_check(database: str | Path) -> dict[str, Any]:
+    """
+    Report whether the database could be committed by accident.
+
+    The database holds message bodies, extracted claims, and the raw model
+    outputs for every run, so publishing it publishes the mailbox. This only
+    reports; it never edits a repository on the owner's behalf.
+    """
+    path = Path(database).expanduser().resolve()
+    root = _git_root(path.parent)
+    if root is None:
+        return {
+            "database": str(path),
+            "inside_git_repository": False,
+            "safe": True,
+            "detail": "The database is not inside a git working tree.",
+        }
+
+    ignored_code, _ = _git(root, "check-ignore", "-q", str(path))
+    if ignored_code == 127:
+        return {
+            "database": str(path),
+            "inside_git_repository": True,
+            "repository": str(root),
+            "safe": None,
+            "detail": "git is not on PATH, so this could not be checked.",
+        }
+    ignored = ignored_code == 0
+    _, remote = _git(root, "remote", "get-url", "origin")
+    return {
+        "database": str(path),
+        "inside_git_repository": True,
+        "repository": str(root),
+        "remote": remote or None,
+        "ignored_by_git": ignored,
+        "safe": ignored,
+        "detail": (
+            "The database is inside a git repository but ignored, so it will "
+            "not be committed."
+            if ignored
+            else "The database is inside a git repository and is NOT ignored. "
+            "It contains message bodies and extracted knowledge. Move it "
+            "outside the repository, or add it to .gitignore, before the next "
+            "commit."
+        ),
+    }
+
+
+def doctor(connection: sqlite3.Connection, database: str | Path) -> dict[str, Any]:
+    """One report answering whether this is ready for an agent to use."""
+
+    def count(table: str, where: str = "") -> int:
+        try:
+            return int(
+                connection.execute(f"SELECT COUNT(*) FROM {table} {where}").fetchone()[
+                    0
+                ]
+            )
+        except sqlite3.Error:
+            return 0
+
+    version = current_version(connection)
+    messages = count("messages")
+    agent_visible = count(
+        "thread_analyses", "WHERE status IN ('verified', 'verified_with_gaps')"
+    )
+    indexed = count("cases")
+    stale = count("thread_analyses", "WHERE status = 'stale'")
+
+    checks: list[dict[str, Any]] = [
+        {
+            "check": "schema_version",
+            "ok": version == SCHEMA_VERSION,
+            "detail": f"database is at {version}, code expects {SCHEMA_VERSION}",
+            "fix": None if version == SCHEMA_VERSION else "run 'init'",
+        },
+        {
+            "check": "messages_imported",
+            "ok": messages > 0,
+            "detail": f"{messages} messages",
+            "fix": None if messages else "run 'ingest' against your export",
+        },
+        {
+            "check": "analyses_available",
+            "ok": agent_visible > 0,
+            "detail": f"{agent_visible} threads an agent may see",
+            "fix": None if agent_visible else "run 'analyze'",
+        },
+        {
+            "check": "index_current",
+            "ok": indexed >= agent_visible and (indexed > 0 or agent_visible == 0),
+            "detail": f"{indexed} cases indexed against {agent_visible} analyses",
+            "fix": None if indexed >= agent_visible else "run 'index'",
+        },
+        {
+            "check": "mcp_extra_installed",
+            "ok": _has_mcp(),
+            "detail": "the mcp package is required to serve agents",
+            "fix": None if _has_mcp() else 'install with pip install -e ".[agent]"',
+        },
+    ]
+    if stale:
+        checks.append(
+            {
+                "check": "stale_analyses",
+                "ok": False,
+                "detail": (
+                    f"{stale} analyses came from the anchored review flow, whose "
+                    "verified status was decided by a model-reported field"
+                ),
+                "fix": "run 'analyze' again to replace them",
+            }
+        )
+
+    exposure = exposure_check(database)
+    checks.append(
+        {
+            "check": "database_not_committable",
+            "ok": bool(exposure["safe"]),
+            "detail": exposure["detail"],
+            "fix": None
+            if exposure["safe"]
+            else "move the database outside the repository or ignore it",
+        }
+    )
+    return {
+        "ready_for_agents": all(item["ok"] for item in checks),
+        "next_steps": [
+            item["fix"] for item in checks if not item["ok"] and item["fix"]
+        ],
+        "checks": checks,
+        "exposure": exposure,
+    }
+
+
+def _has_mcp() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("mcp.server.mcpserver") is not None

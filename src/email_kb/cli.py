@@ -11,6 +11,7 @@ from cursor_sdk import Cursor
 
 from .analysis import analyze_database
 from .database import connect, database_stats, initialize, quality_report
+from .diagnostics import doctor, mcp_config
 from .evaluation import (
     accepted_cards,
     card_coverage,
@@ -250,6 +251,20 @@ def _parser() -> argparse.ArgumentParser:
         help="Write the full report, including both responses, to this file",
     )
 
+    subparsers.add_parser(
+        "doctor", help="Check whether this is ready for an agent to use"
+    )
+
+    mcp = subparsers.add_parser(
+        "mcp-config", help="Print an MCP entry for Claude Code or Cursor"
+    )
+    mcp.add_argument("--client", choices=("claude", "cursor"), required=True)
+    mcp.add_argument(
+        "--allow-feedback",
+        action="store_true",
+        help="Let the agent record whether a result helped, ranking only",
+    )
+
     subparsers.add_parser("models", help="List Cursor models available to the API key")
     return parser
 
@@ -393,6 +408,16 @@ def main(argv: list[str] | None = None) -> int:
                     database_stats(connection)
                     | index_stats(connection)
                     | feedback_stats(connection)
+                )
+            elif args.command == "doctor":
+                _print_json(doctor(connection, args.db))
+            elif args.command == "mcp-config":
+                _print_json(
+                    mcp_config(
+                        args.db,
+                        client=args.client,
+                        allow_feedback=args.allow_feedback,
+                    )
                 )
             elif args.command == "induce":
                 _print_json(_induce(connection, args))

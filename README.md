@@ -171,6 +171,20 @@ API Key 配置完成后查看当前账户实际可用的模型：
 引用通过校验只表示引用存在，既不等于结论由引用蕴含，也不等于个人有用性达到
 相同比例。
 
+## 数据放在哪里
+
+知识库是邮箱的派生物：`messages` 存正文，`analysis_runs` 存每次模型调用的完整
+输出。**导出这个数据库等于导出邮箱。**
+
+所以：
+
+- 代码可以公开，数据不行。仓库里已经忽略了 `data/`、`*.db` 和
+  `evaluation/*.toml`（示例除外）。
+- `doctor` 会检查数据库是不是躺在某个 git 工作区里且没被忽略，是的话直接报警
+  并给出修法。挂到 Agent 之前跑一次。
+- 要做一个聚合多个知识源的 personal-agent 仓库，那个仓库应该只放**配置和
+  说明**，数据库用绝对路径引用，留在仓库外面。
+
 ## 当前限制
 
 - 现有 Graph 导出只记录 `hasAttachments`，没有附件正文。涉及附件的线程会被
@@ -250,8 +264,29 @@ API Key 配置完成后查看当前账户实际可用的模型：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[agent]"
-.\.venv\Scripts\python.exe -m email_kb.mcp_server --db data\knowledge.db
+
+# 先体检：schema、索引是否最新、mcp 是否装了、数据库会不会被误提交
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db doctor
+
+# 生成配置，路径已经解析成绝对路径
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mcp-config --client cursor
+.\.venv\Scripts\python.exe -m email_kb --db data\knowledge.db mcp-config --client claude
 ```
+
+把输出里的 `config` 部分贴进对应文件：
+
+| 客户端 | 项目级 | 全局 |
+| --- | --- | --- |
+| Cursor | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+| Claude Code | `.mcp.json` | `~/.claude.json` |
+
+两边用的是同一套 `mcpServers` 结构，所以同一份配置可以同时挂给两个客户端；
+SQLite 开了 WAL，多个客户端并发读同一个库没有问题。
+
+**读和写是两种权限。** 默认只读。加 `--allow-feedback` 后 Agent 多一个
+`record_usefulness` 工具，可以回写"这条有没有帮上忙"——但它只能影响排序，
+拿不到 `wrong` 和 `outdated`。那两个判断改变可见性，属于你的声明，不该由
+Agent 从一次任务顺不顺利去推断。
 
 工具按**任务意图**命名，而不是按检索方式：
 
