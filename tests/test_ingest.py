@@ -378,6 +378,37 @@ class SourceSurveyTests(unittest.TestCase):
         ):
             self.assertTrue(is_cloud_placeholder(path))
 
+    def test_a_csv_export_without_a_body_column_is_caught_before_import(self) -> None:
+        self.write("mail.csv", "id,subject,bodyPreview,receivedDateTime\n")
+
+        survey = survey_sources([self.root])
+
+        self.assertIn("bodypreview", survey["csv_columns"])
+        self.assertTrue(any("no full body column" in note for note in survey["advice"]))
+
+    def test_a_csv_export_with_a_body_column_is_accepted(self) -> None:
+        self.write("mail.csv", "id,subject,body,receivedDateTime\n")
+
+        survey = survey_sources([self.root])
+
+        self.assertEqual(survey["advice"], [])
+        self.assertTrue(survey["ready"])
+
+    def test_both_columns_present_says_which_one_wins(self) -> None:
+        self.write("mail.csv", "id,body,bodyPreview\n")
+
+        survey = survey_sources([self.root])
+
+        self.assertTrue(any("preview is ignored" in note for note in survey["advice"]))
+
+    def test_raw_json_alongside_csv_silences_the_column_warning(self) -> None:
+        self.write("mail.csv", "id,subject,bodyPreview\n")
+        self.write("mail.json", "{}")
+
+        survey = survey_sources([self.root])
+
+        self.assertEqual(survey["advice"], [])
+
     def test_a_normal_file_is_not_mistaken_for_a_placeholder(self) -> None:
         self.assertFalse(is_cloud_placeholder(self.write("a.json")))
 

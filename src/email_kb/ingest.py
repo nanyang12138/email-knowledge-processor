@@ -69,6 +69,11 @@ def survey_sources(paths: Iterable[str | Path]) -> dict[str, Any]:
 
     placeholders = [path for path in supported if is_cloud_placeholder(path)]
     sizes = [path.stat().st_size for path in supported]
+    csv_columns = _csv_columns(
+        [path for path in supported if path.suffix.casefold() == ".csv"],
+        skip=set(placeholders),
+    )
+    has_json = any(path.suffix.casefold() == ".json" for path in supported)
     return {
         "files_supported": len(supported),
         "files_unsupported": len(unsupported),
@@ -77,13 +82,44 @@ def survey_sources(paths: Iterable[str | Path]) -> dict[str, Any]:
         "largest_file_bytes": max(sizes, default=0),
         "files_not_downloaded": len(placeholders),
         "not_downloaded_examples": [str(path) for path in placeholders[:5]],
+        "csv_columns": sorted(csv_columns) if csv_columns else [],
         "ready": not missing and bool(supported) and not placeholders,
-        "advice": _survey_advice(supported, placeholders, missing),
+        "advice": _survey_advice(
+            supported,
+            placeholders,
+            missing,
+            csv_columns=csv_columns,
+            has_json=has_json,
+        ),
     }
 
 
+BODY_COLUMNS = {"body", "body_content", "bodycontent", "content"}
+PREVIEW_COLUMNS = {"bodypreview", "body_preview", "preview"}
+
+
+def _csv_columns(paths: list[Path], *, skip: set[Path]) -> set[str]:
+    """Read only the header row, so this stays cheap on a large export."""
+    columns: set[str] = set()
+    for path in paths:
+        if path in skip:
+            continue
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                header = next(csv.reader(handle), [])
+        except (OSError, csv.Error, StopIteration):
+            continue
+        columns.update(name.strip().casefold() for name in header if name.strip())
+    return columns
+
+
 def _survey_advice(
-    supported: list[Path], placeholders: list[Path], missing: list[str]
+    supported: list[Path],
+    placeholders: list[Path],
+    missing: list[str],
+    *,
+    csv_columns: set[str],
+    has_json: bool,
 ) -> list[str]:
     advice: list[str] = []
     if missing:
@@ -98,6 +134,25 @@ def _survey_advice(
             "this again. Importing now would work but would block on a "
             "download for every file."
         )
+    # A CSV export that carries only bodyPreview looks complete and imports
+    # cleanly, but every message is truncated to a couple of hundred
+    # characters. Nothing downstream can recover the rest, so it is worth
+    # catching before an import rather than after an analysis run.
+    if csv_columns and not has_json:
+        if not csv_columns & BODY_COLUMNS:
+            found = ", ".join(sorted(csv_columns & PREVIEW_COLUMNS)) or "none"
+            advice.append(
+                "These CSV files have no full body column (found: "
+                f"{found}). Message text will be truncated to whatever preview "
+                "the export contains, and no later step can recover it. Export "
+                "the raw JSON from Graph instead, or add the body field to the "
+                "export."
+            )
+        elif csv_columns & PREVIEW_COLUMNS:
+            advice.append(
+                "These CSV files carry both a body and a preview column. The "
+                "body column is used; the preview is ignored."
+            )
     return advice
 
 
