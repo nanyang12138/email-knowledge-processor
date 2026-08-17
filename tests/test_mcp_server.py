@@ -138,6 +138,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             {tool.name for tool in tools},
             {
+                "search_email",
+                "read_email_thread",
                 "find_similar_cases",
                 "get_applicable_rules",
                 "check_if_i_tried_this_before",

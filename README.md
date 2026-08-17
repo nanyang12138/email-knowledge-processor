@@ -7,6 +7,41 @@
 完整产品方向与公开发布计划见
 [个人知识系统产品计划](docs/PRODUCT_PLAN.md)。
 
+## 最短路径：让 Agent 能翻你的邮件（零模型调用）
+
+不需要 API Key，不需要分析，三条命令，几分钟：
+
+```bash
+pip install -e ".[agent]"
+
+python -m email_kb --db ~/email-kb/knowledge.db init
+python -m email_kb --db ~/email-kb/knowledge.db ingest ~/email-kb-source
+python -m email_kb --db ~/email-kb/knowledge.db index
+```
+
+Windows PowerShell 是同样的命令，把 `python` 换成 `.\.venv\Scripts\python.exe`、
+路径换成反斜杠即可。整个项目是纯 Python，Linux、macOS、Windows 都一样跑。
+
+现在就能搜了，中英文都行：
+
+```bash
+python -m email_kb --db ~/email-kb/knowledge.db search "夜间构建 工具链"
+python -m email_kb --db ~/email-kb/knowledge.db search "build failure" --sender alice --since 2024-01-01
+python -m email_kb --db ~/email-kb/knowledge.db thread "<thread-id>"
+```
+
+挂给 Cursor 或 Claude Code：
+
+```bash
+python -m email_kb --db ~/email-kb/knowledge.db mcp-config --client cursor
+```
+
+Agent 立刻就有 `search_email` 和 `read_email_thread` 两个工具，覆盖**全部**导入的
+邮件。这一层不依赖任何分析，也永远不会因为分析出错而失效。
+
+后面那些（抽取、归纳、评估）解决的是另一个问题：**从几万封邮件里提炼出可复用的
+经验**，而不是搜到某封邮件。那部分要花模型调用，值不值得等你用完这一层再判断。
+
 ## 准确性设计
 
 这不是一次“让模型总结全部邮件”的脚本：

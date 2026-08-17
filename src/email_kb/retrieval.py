@@ -137,6 +137,178 @@ def _message_times(connection: sqlite3.Connection, thread_id: str) -> dict[str, 
     return {str(row["email_id"]): str(row["at"] or "") for row in rows}
 
 
+def _people(row: sqlite3.Row) -> str:
+    names: list[str] = [str(row["sender_name"] or ""), str(row["sender_address"] or "")]
+    for column in ("to_recipients_json", "cc_recipients_json"):
+        for person in json.loads(row[column] or "[]"):
+            if isinstance(person, Mapping):
+                names.append(str(person.get("name") or ""))
+                names.append(str(person.get("address") or ""))
+    return " ".join(name for name in names if name)
+
+
+def index_messages(connection: sqlite3.Connection) -> dict[str, Any]:
+    """
+    Index the mail itself for full-text search.
+
+    This needs no model and no analysis, so it is available the moment an
+    import finishes. Reading the original mail is the thing an agent can do
+    first and the thing that stays useful even where extraction found nothing.
+    """
+    with connection:
+        connection.execute("DELETE FROM messages_fts")
+        indexed = 0
+        for row in connection.execute(
+            """
+            SELECT email_id, conversation_id, subject, clean_body, sender_name,
+                   sender_address, to_recipients_json, cc_recipients_json
+            FROM messages
+            """
+        ).fetchall():
+            connection.execute(
+                """
+                INSERT INTO messages_fts (
+                    email_id, conversation_id, subject, body, people
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    row["email_id"],
+                    row["conversation_id"],
+                    index_text(str(row["subject"] or "")),
+                    index_text(str(row["clean_body"] or "")),
+                    index_text(_people(row)),
+                ),
+            )
+            indexed += 1
+    return {"messages_indexed": indexed}
+
+
+def _excerpt(body: str, tokens: Sequence[str], *, width: int = 400) -> str:
+    """A window of the real text around the first match, not around the start."""
+    lowered = body.casefold()
+    position = min(
+        (
+            found
+            for found in (lowered.find(token) for token in tokens if len(token) > 1)
+            if found >= 0
+        ),
+        default=-1,
+    )
+    if position < 0:
+        return body[:width].strip()
+    start = max(0, position - width // 3)
+    excerpt = body[start : start + width].strip()
+    return f"{'…' if start else ''}{excerpt}{'…' if start + width < len(body) else ''}"
+
+
+def search_messages(
+    connection: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int = 10,
+    sender: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search the original mail. No analysis required."""
+    expression = _match_expression(query)
+    if not expression:
+        return []
+    filters = ""
+    parameters: list[Any] = [expression]
+    if sender:
+        filters += " AND LOWER(COALESCE(m.sender_address, '')) LIKE ?"
+        parameters.append(f"%{sender.casefold()}%")
+    if since:
+        filters += " AND COALESCE(m.sent_at_utc, m.received_at_utc, '') >= ?"
+        parameters.append(since)
+    if until:
+        filters += " AND COALESCE(m.sent_at_utc, m.received_at_utc, '') <= ?"
+        parameters.append(until)
+    parameters.append(limit)
+
+    rows = connection.execute(
+        f"""
+        SELECT m.email_id, m.conversation_id, m.subject, m.clean_body,
+               m.sender_name, m.sender_address,
+               COALESCE(m.sent_at_utc, m.received_at_utc) AS at,
+               m.has_attachments,
+               -bm25(messages_fts, 0.0, 0.0, 6.0, 1.0, 2.0) AS relevance
+        FROM messages_fts
+        JOIN messages AS m ON m.email_id = messages_fts.email_id
+        WHERE messages_fts MATCH ?{filters}
+        ORDER BY relevance DESC
+        LIMIT ?
+        """,
+        parameters,
+    ).fetchall()
+
+    tokens = search_tokens(query)
+    return [
+        {
+            "message_id": row["email_id"],
+            "thread_id": row["conversation_id"],
+            "subject": row["subject"],
+            "from": {
+                "name": row["sender_name"],
+                "address": row["sender_address"],
+            },
+            "sent_at": row["at"],
+            "has_attachments": bool(row["has_attachments"]),
+            "excerpt": _excerpt(str(row["clean_body"] or ""), tokens),
+            "relevance": round(float(row["relevance"]), 4),
+        }
+        for row in rows
+    ]
+
+
+def read_thread(
+    connection: sqlite3.Connection, thread_id: str, *, max_chars: int = 60_000
+) -> dict[str, Any]:
+    """Read one whole conversation in order, as it was received."""
+    rows = connection.execute(
+        """
+        SELECT email_id, subject, clean_body, sender_name, sender_address,
+               COALESCE(sent_at_utc, received_at_utc) AS at, has_attachments
+        FROM messages
+        WHERE conversation_id = ?
+        ORDER BY COALESCE(sent_at_utc, received_at_utc, ''), email_id
+        """,
+        (thread_id,),
+    ).fetchall()
+    messages: list[dict[str, Any]] = []
+    used = 0
+    truncated = 0
+    for row in rows:
+        body = str(row["clean_body"] or "")
+        if used + len(body) > max_chars:
+            truncated += 1
+            continue
+        used += len(body)
+        messages.append(
+            {
+                "message_id": row["email_id"],
+                "subject": row["subject"],
+                "from": {
+                    "name": row["sender_name"],
+                    "address": row["sender_address"],
+                },
+                "sent_at": row["at"],
+                "has_attachments": bool(row["has_attachments"]),
+                "body": body,
+            }
+        )
+    return {
+        "thread_id": thread_id,
+        "message_count": len(rows),
+        "messages": messages,
+        # Never silently drop part of a conversation: an agent reading a
+        # shortened thread would otherwise conclude the rest does not exist.
+        "messages_omitted_for_length": truncated,
+    }
+
+
 def clear_index(connection: sqlite3.Connection) -> None:
     for table in ("claims", "cases", "identifiers", "claims_fts", "cases_fts"):
         connection.execute(f"DELETE FROM {table}")

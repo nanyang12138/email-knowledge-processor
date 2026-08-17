@@ -24,13 +24,24 @@ from .retrieval import find_similar_cases as _find_similar_cases
 from .retrieval import get_applicable_rules as _get_applicable_rules
 from .retrieval import get_case as _get_case
 from .retrieval import lookup_identifier as _lookup_identifier
+from .retrieval import read_thread as _read_thread
+from .retrieval import search_messages as _search_messages
 
 INSTRUCTIONS = """
-This server answers questions about what the mailbox owner has done before,
-using knowledge extracted from their own email and checked against the original
-text.
+This server gives you the mailbox owner's own email, and whatever has been
+distilled from it so far.
 
-Use it before proposing an approach, not after. A useful sequence is:
+There are two layers, and the first one always works.
+
+Layer one is the mail itself. search_email and read_email_thread cover
+everything that has been imported and need no analysis to have been run. Start
+here. If you want to know what happened, who was involved, or what was decided,
+this is usually enough.
+
+Layer two is distilled experience: cases, rules, and prior attempts, each
+checked against the original text. It only covers threads that have been
+analyzed, which may be a small fraction. A useful sequence before proposing an
+approach:
 
 1. Describe the current situation to find_similar_cases.
 2. Ask get_applicable_rules for rules that may bind here.
@@ -38,14 +49,14 @@ Use it before proposing an approach, not after. A useful sequence is:
 4. Open promising results with get_case to read the underlying evidence.
 5. Say how the current situation differs from the past one you are relying on.
 
-Read the `advisories` field on every result. It states what the record does not
-support. In particular, `outcome_state` of "unknown" means nobody wrote down
-whether the approach worked, so it must not be presented as proven.
+Read the `advisories` field on every layer-two result. It states what the record
+does not support. In particular, `outcome_state` of "unknown" means nobody wrote
+down whether the approach worked, so it must not be presented as proven.
 
-This knowledge comes only from email. Reasoning that happened in meetings, chat,
-or someone's head is not here, and outcomes are frequently missing. Absence of a
-case is not evidence that something never happened. Call knowledge_coverage to
-see how much has been analyzed and how reliable it currently is.
+All of this comes only from email. Reasoning that happened in meetings, chat, or
+someone's head is not here, and outcomes are frequently missing. Absence is not
+evidence that something never happened. Call knowledge_coverage to see how much
+exists and how reliable it currently is.
 """.strip()
 
 
@@ -68,6 +79,44 @@ def build_server(database: str | Path, *, allow_feedback: bool = False) -> Any:
 
     path = Path(database).expanduser().resolve()
     server = MCPServer(name="email-knowledge", instructions=INSTRUCTIONS)
+
+    @server.tool()
+    def search_email(
+        query: str,
+        limit: int = 10,
+        sender: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Search the owner's mail directly. Works with no analysis done at all.
+
+        This is the tool to reach for first. It searches the original messages,
+        so it covers everything imported rather than only what has been
+        analyzed. Filter with sender, and with since and until as ISO dates.
+        Follow a promising hit with read_email_thread to see the conversation
+        it belongs to.
+        """
+        return _query(
+            path,
+            _search_messages,
+            query,
+            limit=limit,
+            sender=sender,
+            since=since,
+            until=until,
+        )
+
+    @server.tool()
+    def read_email_thread(thread_id: str) -> dict[str, Any]:
+        """
+        Read one whole conversation in the order it happened.
+
+        Use this after search_email rather than reasoning from excerpts. If
+        messages_omitted_for_length is not zero, part of the thread was left
+        out for size and you have not seen all of it.
+        """
+        return _query(path, _read_thread, thread_id)
 
     @server.tool()
     def find_similar_cases(situation: str, limit: int = 5) -> list[dict[str, Any]]:

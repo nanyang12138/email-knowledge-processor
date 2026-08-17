@@ -38,8 +38,11 @@ from .retrieval import (
     get_applicable_rules,
     get_case,
     index_knowledge,
+    index_messages,
     index_stats,
     lookup_identifier,
+    read_thread,
+    search_messages,
 )
 
 DEFAULT_DATABASE = Path("data") / "knowledge.db"
@@ -145,25 +148,36 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser(
-        "index", help="Rebuild the case and claim retrieval index from analyses"
+        "index",
+        help="Build the search index. The mail itself is indexed with no model "
+        "involved; cases and claims are added once analyses exist",
     )
 
     search = subparsers.add_parser(
-        "search", help="Query the knowledge index the way an agent would"
+        "search", help="Query the index the way an agent would"
     )
     search.add_argument("query")
     search.add_argument(
         "--mode",
-        choices=("cases", "rules", "prior", "identifier"),
-        default="cases",
+        choices=("email", "cases", "rules", "prior", "identifier"),
+        default="email",
         help=(
+            "email: the mail itself, needs no analysis; "
             "cases: past problems resembling this situation; "
             "rules: reusable rules that may apply; "
             "prior: whether this approach was already tried; "
             "identifier: exact CL/bug/ticket lookup"
         ),
     )
-    search.add_argument("--limit", type=int, default=5)
+    search.add_argument("--limit", type=int, default=10)
+    search.add_argument(
+        "--sender", help="Only mail from this address, for --mode email"
+    )
+    search.add_argument("--since", help="ISO date lower bound, for --mode email")
+    search.add_argument("--until", help="ISO date upper bound, for --mode email")
+
+    thread = subparsers.add_parser("thread", help="Read one whole conversation")
+    thread.add_argument("thread_id")
     search.add_argument(
         "--include-partial",
         action="store_true",
@@ -373,6 +387,15 @@ def _replay(connection: Any, args: Any) -> Any:
 
 
 def _search(connection: Any, args: Any) -> Any:
+    if args.mode == "email":
+        return search_messages(
+            connection,
+            args.query,
+            limit=args.limit,
+            sender=args.sender,
+            since=args.since,
+            until=args.until,
+        )
     statuses = list(AGENT_VISIBLE_STATUSES)
     if args.include_partial:
         statuses.append("partial")
@@ -482,9 +505,15 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "report":
                 _print_json(quality_report(connection))
             elif args.command == "index":
-                _print_json(index_knowledge(connection) | index_stats(connection))
+                _print_json(
+                    index_messages(connection)
+                    | index_knowledge(connection)
+                    | index_stats(connection)
+                )
             elif args.command == "search":
                 _print_json(_search(connection, args))
+            elif args.command == "thread":
+                _print_json(read_thread(connection, args.thread_id))
             elif args.command == "case":
                 found = get_case(connection, args.thread_id)
                 if found is None:

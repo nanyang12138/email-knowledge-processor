@@ -280,6 +280,23 @@ CREATE INDEX IF NOT EXISTS idx_rule_candidates_cluster
 """
 
 
+# Full-text search over the mail itself, with no model involved. Extracting
+# knowledge is expensive and slow, and until it has run there is nothing for an
+# agent to work with at all. Indexing the messages costs one pass over rows
+# already imported, so an agent can read six years of mail from the moment the
+# import finishes.
+MESSAGE_SEARCH = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    email_id UNINDEXED,
+    conversation_id UNINDEXED,
+    subject,
+    body,
+    people,
+    tokenize = 'unicode61'
+);
+"""
+
+
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "baseline", BASELINE),
     (2, "independent_passes", INDEPENDENT_PASSES),
@@ -287,6 +304,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (4, "feedback", FEEDBACK),
     (5, "claim_context", CLAIM_CONTEXT),
     (6, "induction", INDUCTION),
+    (7, "message_search", MESSAGE_SEARCH),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
