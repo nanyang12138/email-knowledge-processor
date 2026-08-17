@@ -5,9 +5,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from email_kb.database import connect, database_stats, initialize, iter_thread_ids
-from email_kb.ingest import ingest_sources
+from email_kb.ingest import (
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+    ingest_sources,
+    is_cloud_placeholder,
+    survey_sources,
+)
 
 
 class IngestTests(unittest.TestCase):
@@ -301,6 +308,81 @@ class IngestTests(unittest.TestCase):
             ordered,
             ["owner-thread", "multi-thread", "auto-thread"],
         )
+
+
+class SourceSurveyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write(self, name: str, content: str = "{}") -> Path:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_counts_only_importable_files(self) -> None:
+        self.write("a.json")
+        self.write("nested/b.csv", "subject\n")
+        self.write("notes.txt", "ignore me")
+
+        survey = survey_sources([self.root])
+
+        self.assertEqual(survey["files_supported"], 2)
+        self.assertEqual(survey["files_unsupported"], 1)
+        self.assertTrue(survey["ready"])
+        self.assertEqual(survey["advice"], [])
+
+    def test_a_missing_path_is_reported_not_raised(self) -> None:
+        survey = survey_sources([self.root / "absent"])
+
+        self.assertFalse(survey["ready"])
+        self.assertEqual(len(survey["missing_paths"]), 1)
+        self.assertTrue(any("do not exist" in note for note in survey["advice"]))
+
+    def test_an_empty_folder_says_nothing_was_found(self) -> None:
+        survey = survey_sources([self.root])
+
+        self.assertFalse(survey["ready"])
+        self.assertTrue(any("No .json or .csv" in note for note in survey["advice"]))
+
+    def test_cloud_placeholders_are_found_before_any_download(self) -> None:
+        self.write("a.json")
+        placeholder = self.write("b.json")
+
+        with patch(
+            "email_kb.ingest.is_cloud_placeholder",
+            side_effect=lambda path: Path(path) == placeholder,
+        ):
+            survey = survey_sources([self.root])
+
+        self.assertEqual(survey["files_not_downloaded"], 1)
+        self.assertEqual(survey["not_downloaded_examples"], [str(placeholder)])
+        self.assertFalse(survey["ready"])
+        self.assertTrue(
+            any("Always keep on this device" in note for note in survey["advice"])
+        )
+
+    def test_the_windows_placeholder_attribute_is_what_is_checked(self) -> None:
+        path = self.write("a.json")
+
+        with patch.object(
+            Path,
+            "stat",
+            lambda _self, **_: SimpleNamespace(
+                st_file_attributes=FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+            ),
+        ):
+            self.assertTrue(is_cloud_placeholder(path))
+
+    def test_a_normal_file_is_not_mistaken_for_a_placeholder(self) -> None:
+        self.assertFalse(is_cloud_placeholder(self.write("a.json")))
+
+    def test_a_path_that_disappeared_is_not_a_placeholder(self) -> None:
+        self.assertFalse(is_cloud_placeholder(self.root / "gone.json"))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,87 @@ from .database import (
 
 SUPPORTED_SUFFIXES = {".csv", ".json"}
 
+# OneDrive Files On-Demand leaves a placeholder that reports a real size and a
+# real modification time but holds no content until something reads it. Python's
+# stat module does not carry these two, and st_file_attributes only exists on
+# Windows, so the check is a no-op elsewhere.
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+_PLACEHOLDER_ATTRIBUTES = (
+    FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
+
+
+def is_cloud_placeholder(path: str | Path) -> bool:
+    """
+    Report whether a file is a cloud placeholder rather than local content.
+
+    Reading one works, but it blocks on a download. Across a multi-year export
+    that turns an import into an unexplained overnight run, so it is worth
+    knowing before starting rather than halfway through.
+    """
+    try:
+        attributes = getattr(Path(path).stat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & _PLACEHOLDER_ATTRIBUTES)
+
+
+def survey_sources(paths: Iterable[str | Path]) -> dict[str, Any]:
+    """Describe what an import would face, without reading a single byte."""
+    supported: list[Path] = []
+    unsupported: list[Path] = []
+    missing: list[str] = []
+
+    for value in paths:
+        path = Path(value).expanduser().resolve()
+        if not path.exists():
+            missing.append(str(path))
+            continue
+        candidates = (
+            [path]
+            if path.is_file()
+            else [item for item in path.rglob("*") if item.is_file()]
+        )
+        for candidate in candidates:
+            if candidate.suffix.casefold() in SUPPORTED_SUFFIXES:
+                supported.append(candidate)
+            else:
+                unsupported.append(candidate)
+
+    placeholders = [path for path in supported if is_cloud_placeholder(path)]
+    sizes = [path.stat().st_size for path in supported]
+    return {
+        "files_supported": len(supported),
+        "files_unsupported": len(unsupported),
+        "missing_paths": missing,
+        "bytes_total": sum(sizes),
+        "largest_file_bytes": max(sizes, default=0),
+        "files_not_downloaded": len(placeholders),
+        "not_downloaded_examples": [str(path) for path in placeholders[:5]],
+        "ready": not missing and bool(supported) and not placeholders,
+        "advice": _survey_advice(supported, placeholders, missing),
+    }
+
+
+def _survey_advice(
+    supported: list[Path], placeholders: list[Path], missing: list[str]
+) -> list[str]:
+    advice: list[str] = []
+    if missing:
+        advice.append(f"These paths do not exist: {', '.join(missing)}")
+    if not supported:
+        advice.append("No .json or .csv files were found under these paths.")
+    if placeholders:
+        advice.append(
+            f"{len(placeholders)} files are OneDrive placeholders, not local "
+            "content. Right-click the folder in File Explorer and choose "
+            "'Always keep on this device', wait for it to finish, then run "
+            "this again. Importing now would work but would block on a "
+            "download for every file."
+        )
+    return advice
+
 
 def _json_dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -272,11 +353,14 @@ def ingest_sources(
         "files_imported": 0,
         "files_skipped": 0,
         "files_failed": 0,
+        "files_downloaded_on_demand": 0,
         "messages_imported": 0,
         "errors": [],
     }
     for source in discover_sources(paths):
         summary["files_total"] += 1
+        if is_cloud_placeholder(source):
+            summary["files_downloaded_on_demand"] += 1
         digest = sha256_file(source)
         if not force and source_is_current(connection, source, digest):
             summary["files_skipped"] += 1

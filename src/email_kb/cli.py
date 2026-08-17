@@ -29,7 +29,7 @@ from .induction import (
     list_rules,
     rule_stats,
 )
-from .ingest import ingest_sources
+from .ingest import ingest_sources, survey_sources
 from .providers import build_provider
 from .retrieval import (
     AGENT_VISIBLE_STATUSES,
@@ -85,6 +85,12 @@ def _parser() -> argparse.ArgumentParser:
     ingest.add_argument(
         "--force", action="store_true", help="Re-import unchanged files"
     )
+
+    check = subparsers.add_parser(
+        "check-source",
+        help="Check an export is fully downloaded before importing it",
+    )
+    check.add_argument("paths", nargs="+", type=Path)
 
     subparsers.add_parser("stats", help="Show database counts")
     subparsers.add_parser("report", help="Show evidence and verification quality")
@@ -401,8 +407,20 @@ def _list_models() -> list[dict[str, Any]]:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        # These answer questions about the outside world, so they must not
+        # create a database as a side effect of being asked.
         if args.command == "models":
             _print_json(_list_models())
+            return 0
+        if args.command == "check-source":
+            _print_json(survey_sources(args.paths))
+            return 0
+        if args.command == "mcp-config":
+            _print_json(
+                mcp_config(
+                    args.db, client=args.client, allow_feedback=args.allow_feedback
+                )
+            )
             return 0
 
         connection = connect(args.db)
@@ -426,14 +444,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.command == "doctor":
                 _print_json(doctor(connection, args.db))
-            elif args.command == "mcp-config":
-                _print_json(
-                    mcp_config(
-                        args.db,
-                        client=args.client,
-                        allow_feedback=args.allow_feedback,
-                    )
-                )
             elif args.command == "induce":
                 _print_json(_induce(connection, args))
             elif args.command == "rules":
